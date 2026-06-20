@@ -46,7 +46,7 @@ class LlamaConfig:
     hidden_dim: int = 14336        # FFN intermediate dimension
     vocab_size: int = 128256       # Vocabulary size
     max_seq_len: int = 8192        # Maximum sequence length
-    rope_theta: float = 500000.0   # RoPE base frequency
+    rope_theta: float = 10000.0    # RoPE base frequency (LLaMA/Llama2 default; LLaMA3 = 500000)
     norm_eps: float = 1e-5         # RMSNorm epsilon
     bos_token_id: int = 128000     # Beginning of sequence token
     eos_token_id: int = 128001     # End of sequence token
@@ -65,6 +65,11 @@ class LlamaConfig:
     @classmethod
     def from_hf_config(cls, config_dict: dict) -> "LlamaConfig":
         """Create config from HuggingFace config.json dictionary."""
+        # rope_theta: try multiple key names, default to Llama2 standard 10000
+        rope_theta = config_dict.get("rope_theta",
+                      config_dict.get("rope_theta_base",
+                      config_dict.get("rotary_emb_base", 10000.0)))
+
         return cls(
             dim=config_dict.get("hidden_size", 4096),
             n_layers=config_dict.get("num_hidden_layers", 32),
@@ -76,7 +81,7 @@ class LlamaConfig:
             hidden_dim=config_dict.get("intermediate_size", 14336),
             vocab_size=config_dict.get("vocab_size", 128256),
             max_seq_len=config_dict.get("max_position_embeddings", 8192),
-            rope_theta=config_dict.get("rope_theta", 500000.0),
+            rope_theta=rope_theta,
             norm_eps=config_dict.get("rms_norm_eps", 1e-5),
             bos_token_id=config_dict.get("bos_token_id", 128000),
             eos_token_id=config_dict.get("eos_token_id", 128001),
@@ -91,6 +96,7 @@ class LlamaConfig:
             max_seq_len=2048, rope_theta=10000.0, norm_eps=1e-5,
             bos_token_id=1, eos_token_id=2,
         )
+
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -229,17 +235,12 @@ def precompute_freqs_cis(config: LlamaConfig) -> np.ndarray:
 
 def apply_rotary_emb(xq: np.ndarray, xk: np.ndarray,
                      freqs_cis: np.ndarray, pos: int) -> Tuple[np.ndarray, np.ndarray]:
-    """Apply Rotary Position Embedding (RoPE) in-place style.
+    """Apply Rotary Position Embedding (RoPE) matching HuggingFace convention.
 
-    This rotates pairs of adjacent dimensions in query and key vectors.
-    The rotation angle depends on the token position and the dimension index.
-
-    Mathematical note: RoPE applies a position-dependent rotation matrix
-    R(pos) to each pair of dimensions (2i, 2i+1):
-        [cos(pos*θ_i)  -sin(pos*θ_i)] [x_2i  ]
-        [sin(pos*θ_i)   cos(pos*θ_i)] [x_2i+1]
-
-    This is equivalent to multiplying by e^(i*pos*θ_i) in complex space.
+    HF pairs dimension `i` with `i + head_dim//2` (NOT adjacent pairs).
+    The rotation angle depends on the token position and the dimension index:
+        [cos(pos*θ_i)  -sin(pos*θ_i)] [x_i        ]
+        [sin(pos*θ_i)   cos(pos*θ_i)] [x_{i+d/2}  ]
 
     Args:
         xq:   query tensor  [n_heads, head_dim]
@@ -248,29 +249,28 @@ def apply_rotary_emb(xq: np.ndarray, xk: np.ndarray,
         pos:  current token position
 
     Returns:
-        (rotated_xq, rotated_xk) — new arrays (input unchanged in pure functional style)
+        (rotated_xq, rotated_xk) — new arrays
     """
     head_dim = xq.shape[-1]
+    half_dim = head_dim // 2
 
-    # View as complex numbers: pair (2i, 2i+1) → real + imag
-    xq_complex = xq.reshape(xq.shape[0], -1, 2)
-    xq_complex = xq_complex[..., 0] + 1j * xq_complex[..., 1]  # [n_heads, dim//2]
+    # Get cos/sin for this position [half_dim]
+    freqs = freqs_cis[pos, :]
+    cos = np.real(freqs).astype(np.float32)
+    sin = np.imag(freqs).astype(np.float32)
 
-    xk_complex = xk.reshape(xk.shape[0], -1, 2)
-    xk_complex = xk_complex[..., 0] + 1j * xk_complex[..., 1]  # [n_kv_heads, dim//2]
+    # HF repeats freqs: cos/sin = [cos, cos], [sin, sin]
+    cos_full = np.concatenate([cos, cos], axis=-1)   # [head_dim]
+    sin_full = np.concatenate([sin, sin], axis=-1)   # [head_dim]
 
-    # Get rotation factors for this position
-    freqs = freqs_cis[pos, :]  # [head_dim//2]
+    def rotate(x: np.ndarray) -> np.ndarray:
+        # rotate_half: split at middle, negate+swap
+        x1 = x[..., :half_dim]           # first half
+        x2 = x[..., half_dim:]            # second half
+        rotated = np.concatenate([-x2, x1], axis=-1)  # [-x2, x1]
+        return x * cos_full + rotated * sin_full
 
-    # Complex multiplication to apply rotation
-    xq_rotated = xq_complex * freqs
-    xk_rotated = xk_complex * freqs
-
-    # Convert back to real pairs
-    xq_out = np.stack([xq_rotated.real, xq_rotated.imag], axis=-1).reshape(xq.shape)
-    xk_out = np.stack([xk_rotated.real, xk_rotated.imag], axis=-1).reshape(xk.shape)
-
-    return xq_out.astype(np.float32), xk_out.astype(np.float32)
+    return rotate(xq), rotate(xk)
 
 
 def repeat_kv(x: np.ndarray, n_groups: int) -> np.ndarray:
@@ -390,12 +390,12 @@ def attention_forward(
     # attn_weights: [n_heads, seq_len]
     # v_expanded:   [n_heads, seq_len, head_dim]
     attn_out = np.einsum('hl,hld->hd', attn_weights, v_expanded)  # [n_heads, head_dim]
-    attn_out = attn_out.reshape(dim)  # [dim]
+    attn_out = attn_out.reshape(config.dim)  # [dim]
 
     # ---- 6. Output Projection ----
     attn_out = attn_out @ layer_weights.attn_output.T  # [dim]
 
-    return attn_out.reshape(1, dim), normed
+    return attn_out.reshape(1, config.dim), normed
 
 
 def feed_forward(
@@ -442,7 +442,7 @@ def feed_forward(
     # ---- 5. Down projection ----
     output = merged @ layer_weights.ffn_down.T  # [dim]
 
-    return output.reshape(1, dim)
+    return output.reshape(1, config.dim)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -655,7 +655,7 @@ def load_weights_from_hf(model_path: str) -> Tuple[LlamaConfig, LlamaWeights]:
     # Load model (uses mmap internally for safetensors)
     hf_model = AutoModelForCausalLM.from_pretrained(
         model_path,
-        torch_dtype=torch.float32,
+        dtype=torch.float32,
         low_cpu_mem_usage=True,
     )
 

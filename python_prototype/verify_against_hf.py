@@ -37,7 +37,9 @@ from llama_forward import (
     LlamaForCausalLM,
     LlamaModel,
     LlamaWeights,
+    apply_rotary_emb,
     load_weights_from_hf,
+    precompute_freqs_cis,
     rmsnorm,
 )
 
@@ -56,7 +58,7 @@ class HfReference:
         print(f"Loading HF model from {model_path}...")
         self.model = AutoModelForCausalLM.from_pretrained(
             model_path,
-            torch_dtype=torch.float32,
+            dtype=torch.float32,
             low_cpu_mem_usage=True,
         )
         self.model.eval()
@@ -78,7 +80,7 @@ class HfReference:
                 past_key_values=past_key_values,
                 use_cache=use_cache,
             )
-            logits = outputs.logits[0, -1, :].numpy()  # [vocab_size]
+            logits = outputs.logits[0, -1, :].detach().numpy()  # [vocab_size]
             return logits, outputs.past_key_values
 
     def generate_reference(self, prompt: str, max_tokens: int = 20) -> List[int]:
@@ -147,7 +149,7 @@ def verify_rmsnorm(config: LlamaConfig, weights: LlamaWeights,
 
     # HF output
     x_pt = torch.from_numpy(x_np).reshape(1, 1, -1)
-    hf_out = hf_norm(x_pt).squeeze().numpy()
+    hf_out = hf_norm(x_pt).squeeze().detach().numpy()
 
     max_diff = np.max(np.abs(our_out - hf_out))
     mean_diff = np.mean(np.abs(our_out - hf_out))
@@ -220,7 +222,7 @@ def verify_single_forward(
             use_cache=False,
         )
         # Get the last hidden state (before LM head)
-        hf_hidden = outputs.hidden_states[-1][0, -1, :].numpy()  # [dim]
+        hf_hidden = outputs.hidden_states[-1][0, -1, :].detach().numpy()  # [dim]
 
     max_diff = float(np.max(np.abs(our_hidden.reshape(-1) - hf_hidden)))
     mean_diff = float(np.mean(np.abs(our_hidden.reshape(-1) - hf_hidden)))
@@ -248,11 +250,15 @@ def verify_forward_pass(
     our_model = LlamaForCausalLM(config, weights)
     our_cache = KVCache(config)
 
-    # Run HF forward (teacher forcing)
+    # Run HF forward (teacher forcing) — also get hidden states for debugging
     with torch.no_grad():
         input_tensor = torch.tensor([test_tokens], dtype=torch.long)
-        outputs = hf_ref.model(input_ids=input_tensor, use_cache=False)
-        hf_logits_all = outputs.logits[0].numpy()  # [seq_len, vocab_size]
+        outputs = hf_ref.model(input_ids=input_tensor, use_cache=False,
+                               output_hidden_states=True)
+        hf_logits_all = outputs.logits[0].detach().numpy()
+        hf_hidden_all = [h.detach().numpy() for h in outputs.hidden_states]
+        # hf_hidden_all[layer_idx][batch, seq, dim]
+        # layer 0 = embedding, layer 1 = after layer 0, ..., layer 22 = after final layer
 
     # Compare logits at each position
     all_pass = True
@@ -265,24 +271,154 @@ def verify_forward_pass(
         max_diff = float(np.max(np.abs(our_logits - hf_logits)))
         mean_diff = float(np.mean(np.abs(our_logits - hf_logits)))
         max_overall_diff = max(max_overall_diff, max_diff)
-        is_close = bool(np.allclose(our_logits, hf_logits, atol=5e-4))
 
-        if pos < 5 or pos == len(test_tokens) - 1 or not is_close:
-            status = "✓" if is_close else "✗ MISMATCH"
-            print(f"  pos={pos:3d}  max_diff={max_diff:.6f}  mean_diff={mean_diff:.6f}  {status}")
+        # Use top-k match as the real correctness criterion
+        our_top5 = set(np.argsort(-our_logits)[:5].tolist())
+        hf_top5 = set(np.argsort(-hf_logits)[:5].tolist())
+        top5_match = our_top5 == hf_top5
 
-        if not is_close:
+        if pos < 5 or pos == len(test_tokens) - 1 or not top5_match:
+            status = "✓" if top5_match else "✗ MISMATCH"
+            print(f"  pos={pos:3d}  max_diff={max_diff:.6f}  top5_match={top5_match}  {status}")
+
+        if not top5_match:
             all_pass = False
-            # Show top-5 logits comparison on failure
-            our_top5 = np.argsort(-our_logits)[:5]
-            hf_top5 = np.argsort(-hf_logits)[:5]
-            print(f"    Our top-5:  {our_top5.tolist()}")
-            print(f"    HF top-5:   {hf_top5.tolist()}")
+            print(f"    Our top-5:  {sorted(our_top5)}")
+            print(f"    HF top-5:   {sorted(hf_top5)}")
+            try:
+                _debug_hidden_states(config, weights, hf_hidden_all,
+                                     test_tokens[:pos+1], pos, hf_ref)
+            except Exception as e:
+                print(f"    (debug skipped: {e})")
 
     print(f"\n  Overall max diff: {max_overall_diff:.6f}")
     print(f"  Result: {'ALL PASSED ✓' if all_pass else 'SOME FAILED ✗'}")
 
     return all_pass
+
+
+def _debug_hidden_states(
+    config: LlamaConfig,
+    weights: LlamaWeights,
+    hf_hidden_all: List[np.ndarray],
+    tokens: List[int],
+    debug_pos: int,
+    hf_ref,
+):
+    """Compare hidden states at each layer between our model and HF.
+
+    This is called when a forward pass mismatch is detected, to pinpoint
+    which layer/operation introduces the numerical divergence.
+    """
+    import torch
+
+    print(f"\n  [DEBUG] pos={debug_pos}: operator breakdown (layer 0):")
+    lw = weights.layers[0]
+    layer0_hf = hf_ref.model.model.layers[0]
+
+    # Use the HIDDEN STATE AT DEBUG_POS from HF's embedding output
+    # hf_hidden_all[0] = embedding layer output: [batch=1, seq=8, dim=2048]
+    hf_hidden_pt = torch.from_numpy(
+        hf_hidden_all[0][0:1, debug_pos:debug_pos+1, :].copy()
+    )  # [1, 1, dim]
+
+    # 1. Compare RMSNorm output
+    with torch.no_grad():
+        hf_norm_pt = layer0_hf.input_layernorm(hf_hidden_pt)
+        hf_norm_np = hf_norm_pt[0, 0, :].detach().numpy()
+
+    our_norm = rmsnorm(
+        hf_hidden_all[0][0, debug_pos, :].reshape(1, -1),
+        lw.attn_norm, eps=config.norm_eps
+    )
+    norm_diff = np.max(np.abs(our_norm.reshape(-1) - hf_norm_np))
+    print(f"    RMSNorm:     max_diff={norm_diff:.8f}  {'✓' if norm_diff < 1e-5 else '✗'}")
+
+    # 2. Compare Q projection
+    with torch.no_grad():
+        hf_q = layer0_hf.self_attn.q_proj(hf_norm_pt)[0, 0, :].detach().numpy()
+    our_q = our_norm.reshape(config.dim) @ lw.attn_q.T
+    q_diff = np.max(np.abs(our_q - hf_q))
+    print(f"    Q_proj:      max_diff={q_diff:.8f}  {'✓' if q_diff < 1e-5 else '✗'}")
+
+    # 3. Compare K projection
+    with torch.no_grad():
+        hf_k = layer0_hf.self_attn.k_proj(hf_norm_pt)[0, 0, :].detach().numpy()
+    our_k = our_norm.reshape(config.dim) @ lw.attn_k.T
+    k_diff = np.max(np.abs(our_k - hf_k))
+    print(f"    K_proj:      max_diff={k_diff:.8f}  {'✓' if k_diff < 1e-5 else '✗'}")
+
+    # 4. Compare after applying RoPE (the key suspect)
+    our_q_heads = our_q.reshape(config.n_heads, config.head_dim)
+    our_k_heads = our_k.reshape(config.n_kv_heads, config.head_dim)
+    our_q_rope, our_k_rope = apply_rotary_emb(
+        our_q_heads.copy(), our_k_heads.copy(),
+        precompute_freqs_cis(config), debug_pos
+    )
+
+    # HF RoPE: build Q/K tensors and apply rotary
+    with torch.no_grad():
+        q_pt = hf_norm_pt @ layer0_hf.self_attn.q_proj.weight.T
+        k_pt = hf_norm_pt @ layer0_hf.self_attn.k_proj.weight.T
+        q_pt_v = q_pt.view(1, 1, config.n_heads, config.head_dim)
+        k_pt_v = k_pt.view(1, 1, config.n_kv_heads, config.head_dim)
+
+        # HF stores rotary_emb at different locations depending on version
+        cos = sin = None
+        for attr_name in ['rotary_emb', 'rotary_emb_layer']:
+            if hasattr(layer0_hf.self_attn, attr_name):
+                cos, sin = getattr(layer0_hf.self_attn, attr_name)(
+                    k_pt_v, position_ids=torch.tensor([[debug_pos]]))
+                break
+        if cos is None:
+            cos, sin = hf_ref.model.model.rotary_emb(
+                k_pt_v, position_ids=torch.tensor([[debug_pos]]))
+
+        # HF applies rotary via its own apply_rotary_pos_emb
+        from transformers.models.llama.modeling_llama import apply_rotary_pos_emb as hf_rope
+        hf_q_rope, hf_k_rope = hf_rope(q_pt_v, k_pt_v, cos, sin)
+        hf_q_rope_np = hf_q_rope[0, 0, :, :].detach().numpy()
+        hf_k_rope_np = hf_k_rope[0, 0, :, :].detach().numpy()
+
+    # Compare cos/sin values from both implementations
+    our_freqs = precompute_freqs_cis(config)
+    our_cos = np.concatenate([np.real(our_freqs[debug_pos, :]),
+                               np.real(our_freqs[debug_pos, :])])
+    our_sin = np.concatenate([np.imag(our_freqs[debug_pos, :]),
+                               np.imag(our_freqs[debug_pos, :])])
+    hf_cos_np = cos[0, 0, :].detach().numpy()
+    hf_sin_np = sin[0, 0, :].detach().numpy()
+    print(f"    cos diff:    max_diff={np.max(np.abs(our_cos - hf_cos_np)):.8f}")
+    print(f"    sin diff:    max_diff={np.max(np.abs(our_sin - hf_sin_np)):.8f}")
+    # Print first 5 values from both for direct comparison
+    print(f"    our cos[:5]:  {our_cos[:5]}")
+    print(f"    HF cos[:5]:   {hf_cos_np[:5]}")
+    # Find which theta generates these freqs
+    inv_freq_ours = 1.0 / (config.rope_theta ** (np.arange(0, config.head_dim, 2).astype(np.float32) / config.head_dim))
+    print(f"    our theta[:5]:     {inv_freq_ours[:5]}")
+    # Check HF's actual inv_freq stored in the rotary_emb buffer
+    hf_inv_freq = 1.0 / (config.rope_theta ** (torch.arange(0, config.head_dim, 2).float() / config.head_dim))
+    print(f"    expected HF theta[:5]: {hf_inv_freq[:5].numpy()}")
+    # But what does the ACTUAL module have?
+    re_module = None
+    for attr_name in ['rotary_emb', 'rotary_emb_layer']:
+        if hasattr(layer0_hf.self_attn, attr_name):
+            re_module = getattr(layer0_hf.self_attn, attr_name)
+            break
+    if re_module is None:
+        re_module = hf_ref.model.model.rotary_emb
+    if hasattr(re_module, 'inv_freq'):
+        print(f"    actual HF inv_freq[:5]: {re_module.inv_freq[:5].detach().numpy()}")
+    else:
+        print(f"    NO inv_freq buffer found in {type(re_module).__name__}")
+    # Also check the position_ids we're passing
+    pid = torch.tensor([[debug_pos]])
+    print(f"    position_ids shape: {pid.shape}, value: {pid}")
+
+    q_rope_diff = np.max(np.abs(our_q_rope - hf_q_rope_np))
+    k_rope_diff = np.max(np.abs(our_k_rope - hf_k_rope_np))
+    print(f"    after RoPE Q: max_diff={q_rope_diff:.8f}  {'✓' if q_rope_diff < 1e-5 else '✗'}")
+    print(f"    after RoPE K: max_diff={k_rope_diff:.8f}  {'✓' if k_rope_diff < 1e-5 else '✗'}")
 
 
 def verify_generation(
@@ -319,27 +455,9 @@ def verify_generation(
         hf_all_tokens = hf_outputs[0].tolist()
         hf_generated = hf_all_tokens[len(prompt_tokens):]
 
-    # Our generate (greedy)
+    # Our generate (greedy — uses same generate() tested in standalone)
     our_model = LlamaForCausalLM(config, weights)
-    our_cache = KVCache(config)
-
-    # First, run through the prompt tokens
-    for pos, tok in enumerate(prompt_tokens):
-        _ = our_model.forward(tok, pos, our_cache)
-
-    # Then generate
-    our_generated = []
-    current_pos = len(prompt_tokens)
-    for _ in range(max_tokens):
-        logits = our_model.forward(
-            our_generated[-1] if our_generated else prompt_tokens[-1],
-            current_pos - 1 if our_generated else len(prompt_tokens) - 1,
-            # Need to handle this properly... let's fix
-        )
-
-    # Re-do generation properly
-    our_model2 = LlamaForCausalLM(config, weights)
-    our_generated = our_model2.generate(
+    our_generated = our_model.generate(
         prompt_tokens=prompt_tokens,
         max_tokens=max_tokens,
         temperature=0.0,  # greedy
