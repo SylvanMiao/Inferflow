@@ -30,3 +30,6 @@ todo.md
 
 
 model
+llama-engine/build/
+llama-engine/third_party/
+llama-engine/test/

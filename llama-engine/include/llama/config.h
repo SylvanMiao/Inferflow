@@ -29,7 +29,7 @@ struct ModelConfig {
 
     // ---- Normalization ----
     float norm_eps      = 1e-5f;   // RMSNorm epsilon
-    float rope_theta    = 500000.0f; // RoPE base frequency
+    float rope_theta    = 10000.0f;  // RoPE base frequency (LLaMA/Llama2 default; LLaMA3 = 500000)
 
     // ---- Special tokens ----
     int32_t bos_token_id = 128000;  // Beginning of sequence
