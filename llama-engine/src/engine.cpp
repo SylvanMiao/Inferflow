@@ -35,6 +35,39 @@ void read_vector(std::ifstream& f, std::vector<T>& vec, size_t n) {
     f.read(reinterpret_cast<char*>(vec.data()), n * sizeof(T));
 }
 
+std::string apply_stop_strings(const std::string& text,
+                               const std::vector<std::string>& stop_strings,
+                               bool& stopped) {
+    size_t stop_pos = std::string::npos;
+    for (const auto& stop : stop_strings) {
+        if (stop.empty()) continue;
+        size_t pos = text.find(stop);
+        if (pos != std::string::npos && (stop_pos == std::string::npos || pos < stop_pos)) {
+            stop_pos = pos;
+        }
+    }
+
+    stopped = stop_pos != std::string::npos;
+    if (!stopped) return text;
+    return text.substr(0, stop_pos);
+}
+
+std::string hold_stop_prefix_suffix(const std::string& text,
+                                    const std::vector<std::string>& stop_strings) {
+    size_t hold_len = 0;
+    for (const auto& stop : stop_strings) {
+        if (stop.empty()) continue;
+        size_t max_len = std::min(text.size(), stop.size() - 1);
+        for (size_t len = 1; len <= max_len; ++len) {
+            if (text.compare(text.size() - len, len, stop, 0, len) == 0) {
+                hold_len = std::max(hold_len, len);
+            }
+        }
+    }
+
+    return text.substr(0, text.size() - hold_len);
+}
+
 }  // anonymous namespace
 
 LlamaEngine::LlamaEngine()  = default;
@@ -151,6 +184,22 @@ bool LlamaEngine::load(const std::string& model_path) {
     return true;
 }
 
+bool LlamaEngine::load_tokenizer(const std::string& tokenizer_path) {
+    auto tokenizer = std::make_unique<SentencePieceTokenizer>();
+    if (!tokenizer->load(tokenizer_path)) {
+        return false;
+    }
+
+    if (loaded_ && tokenizer->vocab_size() != config_.vocab_size) {
+        std::cerr << "Tokenizer vocab size mismatch: tokenizer=" << tokenizer->vocab_size()
+                  << " model=" << config_.vocab_size << std::endl;
+        return false;
+    }
+
+    tokenizer_ = std::move(tokenizer);
+    return true;
+}
+
 void LlamaEngine::init_buffers() {
     int dim       = config_.dim;
     int kv_dim    = config_.kv_dim;
@@ -201,6 +250,7 @@ void LlamaEngine::generate_stream(const std::vector<int>& prompt_tokens,
                                    TokenCallback callback,
                                    const GenerationConfig& gen_cfg) {
     if (!loaded_) return;
+    if (gen_cfg.max_tokens <= 0) return;
 
     sampler_->set_config(gen_cfg);
     kv_cache_->clear();
@@ -225,6 +275,8 @@ void LlamaEngine::generate_stream(const std::vector<int>& prompt_tokens,
         next_token = sampler_->sample(logits);
     }
 
+    int decode_pos = prompt_len > 0 ? prompt_len : 1;
+
     // Generation loop
     for (int step = 0; step < max_tokens; ++step) {
         // Callback with decoded token
@@ -233,7 +285,7 @@ void LlamaEngine::generate_stream(const std::vector<int>& prompt_tokens,
 
         if (next_token == eos) break;
 
-        Eigen::VectorXf logits = forward(next_token, prompt_len + step);
+        Eigen::VectorXf logits = forward(next_token, decode_pos + step);
         next_token = sampler_->sample(logits);
     }
 }
@@ -241,14 +293,105 @@ void LlamaEngine::generate_stream(const std::vector<int>& prompt_tokens,
 std::vector<int> LlamaEngine::generate(const std::vector<int>& prompt_tokens,
                                         const GenerationConfig& gen_cfg) {
     std::vector<int> result;
-    generate_stream(prompt_tokens,
-        [&](const std::string& /*token*/, bool eos) {
-            // We don't have token string decoding yet (Phase 2).
-            // For now, just collect token count.
-            (void)eos;
+    if (!loaded_ || gen_cfg.max_tokens <= 0) return result;
+
+    sampler_->set_config(gen_cfg);
+    kv_cache_->clear();
+
+    int max_tokens = gen_cfg.max_tokens;
+    int prompt_len = static_cast<int>(prompt_tokens.size());
+    int eos = config_.eos_token_id;
+
+    for (int pos = 0; pos < prompt_len - 1; ++pos) {
+        forward(prompt_tokens[pos], pos);
+    }
+
+    int next_token;
+    if (prompt_len > 0) {
+        Eigen::VectorXf logits = forward(prompt_tokens.back(), prompt_len - 1);
+        next_token = sampler_->sample(logits);
+    } else {
+        Eigen::VectorXf logits = forward(config_.bos_token_id, 0);
+        next_token = sampler_->sample(logits);
+    }
+
+    int decode_pos = prompt_len > 0 ? prompt_len : 1;
+
+    for (int step = 0; step < max_tokens; ++step) {
+        result.push_back(next_token);
+        if (next_token == eos) break;
+
+        Eigen::VectorXf logits = forward(next_token, decode_pos + step);
+        next_token = sampler_->sample(logits);
+    }
+
+    return result;
+}
+
+std::string LlamaEngine::generate_text(const std::string& prompt,
+                                       const GenerationConfig& gen_cfg) {
+    std::string result;
+    generate_text_stream(prompt,
+        [&result](const std::string& token, bool) {
+            result += token;
         },
         gen_cfg);
-    return result;  // MVP: returns empty; Phase 2 with tokenizer
+    return result;
+}
+
+void LlamaEngine::generate_text_stream(const std::string& prompt,
+                                       TokenCallback callback,
+                                       const GenerationConfig& gen_cfg) {
+    if (!loaded_ || !tokenizer_ || gen_cfg.max_tokens <= 0) return;
+
+    sampler_->set_config(gen_cfg);
+    kv_cache_->clear();
+
+    auto prompt_tokens = tokenizer_->encode(prompt, true, false);
+    std::vector<int> output_tokens;
+    std::string emitted_text;
+
+    int prompt_len = static_cast<int>(prompt_tokens.size());
+    int eos = config_.eos_token_id;
+
+    for (int pos = 0; pos < prompt_len - 1; ++pos) {
+        forward(prompt_tokens[pos], pos);
+    }
+
+    int next_token;
+    if (prompt_len > 0) {
+        Eigen::VectorXf logits = forward(prompt_tokens.back(), prompt_len - 1);
+        next_token = sampler_->sample(logits);
+    } else {
+        Eigen::VectorXf logits = forward(config_.bos_token_id, 0);
+        next_token = sampler_->sample(logits);
+    }
+
+    int decode_pos = prompt_len > 0 ? prompt_len : 1;
+
+    for (int step = 0; step < gen_cfg.max_tokens; ++step) {
+        output_tokens.push_back(next_token);
+        std::string decoded_text = tokenizer_->decode(output_tokens);
+
+        bool stopped = false;
+        std::string visible_text = apply_stop_strings(decoded_text, gen_cfg.stop_strings, stopped);
+        if (!stopped) {
+            visible_text = hold_stop_prefix_suffix(visible_text, gen_cfg.stop_strings);
+        }
+        bool finished = stopped || next_token == eos;
+
+        if (visible_text.size() > emitted_text.size()) {
+            callback(visible_text.substr(emitted_text.size()), finished);
+            emitted_text = std::move(visible_text);
+        } else if (finished) {
+            callback("", true);
+        }
+
+        if (finished) break;
+
+        Eigen::VectorXf logits = forward(next_token, decode_pos + step);
+        next_token = sampler_->sample(logits);
+    }
 }
 
 void LlamaEngine::reset_kv_cache() {

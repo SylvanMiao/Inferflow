@@ -2,7 +2,9 @@
 #include "program_state_test.h"
 #include "router.h"
 #include "session/session_manager.h"
+#include "llama/engine.h"
 
+#include <mutex>
 
 http_connection::http_connection(tcp::socket socket) : _socket(std::move(socket))
 {
@@ -174,6 +176,12 @@ void http_connection::register_route_handlers()
     handle_chat_echo(ctx);
   };
 
+  _static_handlers[router::static_route::chat_completions] =
+      [this](middleware::HttpContext &ctx)
+  {
+    handle_chat_completions(ctx);
+  };
+
   _static_handlers[router::static_route::chat_history] =
       [this](middleware::HttpContext &ctx)
   {
@@ -208,6 +216,44 @@ void http_connection::register_route_handlers()
 
 namespace
 {
+  std::string getenv_or_default(const char *key, const std::string &fallback)
+  {
+    const char *value = std::getenv(key);
+    if (value == nullptr || *value == '\0')
+    {
+      return fallback;
+    }
+    return value;
+  }
+
+  llama::LlamaEngine &inference_engine()
+  {
+    static llama::LlamaEngine engine;
+    static std::once_flag init_flag;
+    static bool ready = false;
+
+    std::call_once(init_flag, []()
+                   {
+                     const auto model_path = getenv_or_default(
+                         "INFERFLOW_MODEL_PATH", INFERFLOW_DEFAULT_MODEL_PATH);
+                     const auto tokenizer_path = getenv_or_default(
+                         "INFERFLOW_TOKENIZER_PATH", INFERFLOW_DEFAULT_TOKENIZER_PATH);
+
+                     ready = engine.load(model_path) && engine.load_tokenizer(tokenizer_path);
+                     if (!ready)
+                     {
+                       std::cerr << "Failed to initialize inference engine. model="
+                                 << model_path << " tokenizer=" << tokenizer_path << std::endl;
+                     }
+                   });
+
+    if (!ready)
+    {
+      throw std::runtime_error("inference engine is not ready");
+    }
+    return engine;
+  }
+
   std::string read_cookie_value(const http::request<http::dynamic_body> &request,
                                 const std::string &key)
   {
@@ -591,6 +637,86 @@ void http_connection::handle_chat_echo(middleware::HttpContext &ctx)
     resp["history"].append(row);
   }
 
+  beast::ostream(ctx.response.body()) << resp.toStyledString();
+}
+
+void http_connection::handle_chat_completions(middleware::HttpContext &ctx)
+{
+  Json::Value root;
+  if (!parse_chat_body(root))
+  {
+    return;
+  }
+
+  SessionConfig config;
+  config.user_file = "static/users.json";
+  config.db_config_file = "static/db.json";
+  config.ttl_seconds = 3600;
+
+  auto &manager = SessionManager::instance();
+  if (!manager.ensure_initialized(config))
+  {
+    send_error(http::status::internal_server_error, 1500, "session manager init failed");
+    return;
+  }
+
+  const auto session_id = read_cookie_value(ctx.request, "SID");
+  if (session_id.empty())
+  {
+    send_error(http::status::unauthorized, 1403, "missing session");
+    return;
+  }
+
+  auto record = manager.get_session(session_id);
+  if (!record)
+  {
+    send_error(http::status::unauthorized, 1403, "session expired");
+    return;
+  }
+
+  const auto user_text = root["message"].asString();
+  llama::GenerationConfig gen_cfg;
+  gen_cfg.temperature = 0.0f;
+  gen_cfg.max_tokens = root.get("max_tokens", 32).asInt();
+  if (gen_cfg.max_tokens <= 0 || gen_cfg.max_tokens > 256)
+  {
+    send_error(http::status::bad_request, 1006, "max_tokens must be in range [1, 256]");
+    return;
+  }
+
+  std::string reply_text;
+  try
+  {
+    reply_text = inference_engine().generate_text(user_text, gen_cfg);
+  }
+  catch (const std::exception &e)
+  {
+    send_error(http::status::internal_server_error, 1503, e.what());
+    return;
+  }
+
+  std::string db_error;
+  if (!manager.append_chat_message(record->session_id, record->user_id, "user", user_text, db_error))
+  {
+    send_error(http::status::internal_server_error, 1501, db_error);
+    return;
+  }
+
+  if (!manager.append_chat_message(record->session_id, record->user_id, "assistant", reply_text, db_error))
+  {
+    send_error(http::status::internal_server_error, 1501, db_error);
+    return;
+  }
+
+  ctx.response.result(http::status::ok);
+  ctx.response.set(http::field::content_type, "application/json; charset=utf-8");
+
+  Json::Value resp;
+  resp["error"] = 0;
+  resp["reply"] = reply_text;
+  resp["user"] = record->user_id;
+  resp["model"] = "tinyllama";
+  resp["max_tokens"] = gen_cfg.max_tokens;
   beast::ostream(ctx.response.body()) << resp.toStyledString();
 }
 

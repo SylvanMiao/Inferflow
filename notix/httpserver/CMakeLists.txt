@@ -8,6 +8,11 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 find_package(Boost REQUIRED COMPONENTS system)
 find_package(Threads REQUIRED)
 
+add_subdirectory(
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../llama-engine"
+    "${CMAKE_CURRENT_BINARY_DIR}/llama-engine-build"
+)
+
 find_package(PkgConfig QUIET)
 if(PkgConfig_FOUND)
     pkg_check_modules(JSONCPP QUIET jsoncpp)
@@ -62,7 +67,13 @@ target_include_directories(http_server PRIVATE
     ${MYSQL_INCLUDE_DIRS}
 )
 
+target_compile_definitions(http_server PRIVATE
+    INFERFLOW_DEFAULT_MODEL_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../../llama-engine/test/tinyllama.bin"
+    INFERFLOW_DEFAULT_TOKENIZER_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../../../models/tokenizer.model"
+)
+
 target_link_libraries(http_server PRIVATE
+    llama_engine
     Boost::system
     Threads::Threads
     ${JSONCPP_LIBRARIES}

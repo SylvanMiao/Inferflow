@@ -18,6 +18,7 @@
 #include "config.h"
 #include "kv_cache.h"
 #include "sampler.h"
+#include "tokenizer.h"
 #include "weights.h"
 
 namespace llama {
@@ -35,8 +36,10 @@ public:
      * GGUF support planned for Phase 2.
      */
     bool load(const std::string& model_path);
+    bool load_tokenizer(const std::string& tokenizer_path);
 
     bool is_loaded() const { return loaded_; }
+    bool has_tokenizer() const { return tokenizer_ != nullptr; }
 
     // ---- Model info ----
 
@@ -63,6 +66,19 @@ public:
                               const GenerationConfig& gen_cfg = {});
 
     /**
+     * Generate text from a prompt string. Requires load_tokenizer().
+     */
+    std::string generate_text(const std::string& prompt,
+                              const GenerationConfig& gen_cfg = {});
+
+    /**
+     * Generate text with per-token callback. Requires load_tokenizer().
+     */
+    void generate_text_stream(const std::string& prompt,
+                              TokenCallback callback,
+                              const GenerationConfig& gen_cfg = {});
+
+    /**
      * Single forward step: input token → output logits.
      * Updates internal KV cache at position `pos`.
      */
@@ -83,6 +99,7 @@ private:
     LlamaWeights weights_;
     std::unique_ptr<KVCache> kv_cache_;
     std::unique_ptr<Sampler> sampler_;
+    std::unique_ptr<Tokenizer> tokenizer_;
     bool loaded_ = false;
 
     // RoPE precomputed cache

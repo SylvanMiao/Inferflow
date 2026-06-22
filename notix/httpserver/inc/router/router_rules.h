@@ -30,6 +30,7 @@ namespace router
 		app_page,         ///< `GET /app`
 		chat_history,     ///< `GET /chat/history`
 		chat_echo,        ///< `POST /chat/echo`
+		chat_completions, ///< `POST /chat/completions`
 		image_process,    ///< `POST /image/process`
 		me               ///< `GET /me`
 	};
@@ -68,6 +69,8 @@ namespace router
 	inline constexpr std::string_view AppRoute = "/app";
 	/** @brief 静态路由：会话 echo */
 	inline constexpr std::string_view ChatEchoRoute = "/chat/echo";
+	/** @brief 静态路由：LLM 对话补全 */
+	inline constexpr std::string_view ChatCompletionsRoute = "/chat/completions";
 	/** @brief 静态路由：聊天历史 */
 	inline constexpr std::string_view ChatHistoryRoute = "/chat/history";
 	/** @brief 静态路由：图像处理占位 */
@@ -107,4 +110,3 @@ namespace router
 													 std::string_view target,
 													 route_params &params);
 }
-

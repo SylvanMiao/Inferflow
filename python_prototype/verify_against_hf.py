@@ -1,5 +1,5 @@
 """
-Phase 0 Verification: Compare NumPy LLaMA Forward Pass vs HuggingFace
+Verification: Compare NumPy LLaMA Forward Pass vs HuggingFace
 =====================================================================
 
 This script:

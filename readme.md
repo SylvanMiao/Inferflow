@@ -1,190 +1,214 @@
-# Notix 项目说明
+# InferFlow 大模型推理服务框架
 
-## 项目简述
+InferFlow 是一个面向本地与私有化部署场景的轻量级大模型推理服务框架。当前重点围绕 decoder-only LLM 构建模型加载、Tokenizer、KV Cache、token-level decoding、采样与命令行交互能力，并为后续 HTTP API、CUDA backend、Int8 量化和多模态 embedding 扩展预留接口。
 
-开发平台：`Ubuntu 22.04`
-
-当前核心目标是基于 Asio + Beast 构建可演进的 HTTP 网关框架，在此基础上集成**本地 LLM 推理引擎**，实现 local-first 的 AI 对话服务。
-
-已规划：
-
-1. 使用 Asio 构建异步网络服务器
-2. 使用 Beast 实现 HTTP 网关能力
-3. 用户信息录入与管理
-4. **本地 LLM 推理能力集成**（自研 C++ 推理引擎）
-5. LLM 问答模块集成
+当前验证模型为 TinyLlama-1.1B，推理流程与 LLaMA 类 decoder-only 模型保持一致，适合用于调试 RMSNorm、RoPE、Attention、SwiGLU、KV Cache 和自回归生成流程。
 
 ---
 
-## 项目目录
-
-```
-notix/
-├── httpserver/                    # HTTP 服务框架（已有）
-│   ├── inc/
-│   │   ├── http/                  # Beast HTTP 连接处理
-│   │   ├── router/                # 静态/动态路由
-│   │   ├── middleware/             # 中间件（before/after 管线）
-│   │   ├── session/               # Session 管理
-│   │   └── db/                    # MySQL 连接池
-│   ├── src/                       # 实现文件
-│   └── static/                    # 前端页面（HTML）
-│
-├── python_prototype/              # Phase 0: NumPy 参考实现
-│   ├── llama_forward.py            # 完整 LLaMA 前向传播（已验证）
-│   ├── verify_against_hf.py        # 与 HuggingFace 对比验证
-│   ├── export_model.py             # 导出 HF 权重 → C++ 二进制格式
-│   └── README.md
-│
-├── llama-engine/                  # Phase 1: C++ 推理引擎
-│   ├── CMakeLists.txt
-│   ├── third_party/eigen3/        # Eigen 3.4（线性代数，header-only）
-│   ├── include/llama/
-│   │   ├── config.h                # ModelConfig + GenerationConfig
-│   │   ├── weights.h               # 权重结构体
-│   │   ├── ops.h                   # 算子（rmsnorm, rope, attention 等）
-│   │   ├── kv_cache.h              # KV 缓存
-│   │   ├── sampler.h               # 采样器（temperature, top-k, top-p）
-│   │   └── engine.h                # 主引擎接口
-│   ├── src/                        # 算子 + 引擎实现
-│   └── test/                       # 单元测试 + HF 对比验证
-│
-└── docs/
-    ├── llm-inference-engine-plan.md   # 技术方案（详细设计）
-    └── phase1-cpp-engine-summary.md   # Phase 1 总结
-```
-
----
-
-## 当前能力状态（2026-06-20）
-
-### HTTP 框架
-
-- 基础 HTTP 网关：GET/POST 分发、统一 JSON 错误返回、请求体大小限制
-- 路由框架：静态路由 + 动态路由 + handler 注册分发
-- 中间件机制：before/after 管线、方法守卫、上下文封装
-- 用户体系：登录、注册、会话 Cookie、Session 持久化
-- 数据库能力：MySQL 连接池、Session 持久化、聊天记录持久化
-- 前端页面：登录页、注册页、功能页（对话区 + 图像处理占位区）
-- AI 接口雏形：`/chat/echo`、`/image/process`
-
-### LLM 推理引擎
-
-- **Phase 0: NumPy 原型** ✅ — 完整 LLaMA 前向传播实现，已与 HuggingFace 逐 token 验证通过
-- **Phase 1: C++ 引擎** ✅ — 核心算子（RMSNorm, RoPE, Attention, SwiGLU）全部实现，与 HF 输出完全一致（max_diff < 5e-5）
-- 模型支持：LLaMA 架构（已验证 TinyLlama-1.1B），支持 GQA
-- 采样策略：temperature、top-k、top-p
-- 待完成：Tokenizer 集成、GGUF 加载、Notix InferenceWorker、SSE 流式端点
-
----
-
-## AI 能力路线图
-
-### 已完成
-
-- **Phase 0**：Python/NumPy 原型，与 HuggingFace 对比验证（5/5 全 PASS）
-- **Phase 1**：C++ 推理引擎核心，与 HF 前向对比验证（6/6 全 PASS，12 项单元测试全通过）
-
-### 计划中
-
-**Phase 2：可用化**
-
-| 任务 | 说明 |
-|------|------|
-| Tokenizer 集成 | 封装 SentencePiece，文本 ↔ token |
-| GGUF 模型加载 | 替换自定义 binary，支持社区模型 |
-| Notix InferenceWorker | 推理线程池 + 异步请求队列 |
-| SSE `/chat/completions` | 流式输出，对标 OpenAI API |
-| 前端流式适配 | app.html 接入流式对话 |
-
-**Phase 3：性能优化**
-
-| 任务 | 说明 |
-|------|------|
-| OpenBLAS 加速 | 大矩阵乘法 3-5× 提升 |
-| FP16 推理 | 内存占用减半 |
-| CUDA 后端 | GPU 推理支持 |
-
-**Phase 4：功能扩展**
-
-| 任务 | 说明 |
-|------|------|
-| 多模型架构 | Qwen、Mistral 等 |
-| Tool calling | Function calling |
-| 多模态 | 图像理解模型 |
-
----
-
-## 技术架构（LLM 引擎部分）
-
-```
-HTTP Request → Notix Router → InferenceGateway
-                                  │
-                    boost::asio::post (异步)
-                                  │
-                    ┌─────────────▼─────────────┐
-                    │   Inference Thread Pool    │
-                    │  ┌───────────────────────┐ │
-                    │  │    LlamaEngine         │ │
-                    │  │  forward(token, pos)   │ │
-                    │  │    → embedding         │ │
-                    │  │    → [Layer × N]       │ │
-                    │  │       ├─ RMSNorm       │ │
-                    │  │       ├─ QKV + RoPE    │ │
-                    │  │       ├─ Attention     │ │
-                    │  │       └─ SwiGLU FFN    │ │
-                    │  │    → RMSNorm → LM Head │ │
-                    │  │    → Sampler → token   │ │
-                    │  └───────────────────────┘ │
-                    └───────────────────────────┘
-                                  │
-                    SSE stream → HTTP Response
-```
-
-每个 C++ 算子的实现均有 NumPy 版本作为参考标准。
-
----
-
-## 开发里程碑
-
-- **2026-03-10**：验证 Boost.Beast 与 JsonCpp 基础可用
-- **2026-04-13**：完成基础 Beast HTTP 框架与路由雏形
-- **2026-04-16**：中间件框架落地（before/after + 可视化验证）
-- **2026-04-18**：将路由回调修改为 handler 风格
-- **2026-04-19**：实现用户与数据基础能力（注册/登录/会话/MySQL），开放 Echo 与图像处理占位接口
-- **2026-06-20**：Phase 0 NumPy 原型完成，与 HuggingFace 全量验证通过
-- **2026-06-20**：Phase 1 C++ 推理引擎完成，与 HF 前向对比 6/6 全 PASS，12 项单元测试全通过
-
----
-
-## 构建与运行
+## 当前能力
 
 ### 推理引擎
 
-```bash
-cd llama-engine
-mkdir -p build && cd build
-cmake ..
-make -j$(nproc)
-./test_ops      # 算子单元测试
-./test_engine   # 引擎集成测试
+- 支持 LLaMA 类 decoder-only Transformer 前向推理。
+- 实现 RMSNorm、RoPE、GQA Attention、SwiGLU、LM Head 等核心模块。
+- 实现 KV Cache 加速的 autoregressive decoding。
+- 实现 temperature、top-k、top-p 采样器。
+- 实现 `generate()`、`generate_text()`、`generate_text_stream()`。
+- 接入 C++ SentencePiece tokenizer，支持文本 encode/decode。
+- 支持 stop string 截断，避免输出 `</s>`、`<|user|>` 等模板标记。
+- 提供命令行对话 demo `inferflow_cli`。
+
+### 正确性验证
+
+- Python/NumPy 原型用于对齐 HuggingFace 行为。
+- C++ 推理引擎已与 HuggingFace 逐 token 前向结果对齐。
+- TinyLlama 测试样例中 top-5 logits match 通过，最大误差约 `4.77e-05`。
+
+### 服务化承载
+
+项目内保留 Boost.Asio/Beast HTTP 服务模块，用于后续将本地推理能力封装为 `/chat/completions` API。该部分包含基础路由、中间件、Cookie Session、MySQL 会话与聊天历史持久化，但当前 README 不再以 Web 网关为主要叙事。
+
+---
+
+## 目录结构
+
+```text
+notix/
+├── llama-engine/                  # 推理引擎主体
+│   ├── include/llama/
+│   │   ├── config.h                # ModelConfig / GenerationConfig
+│   │   ├── weights.h               # 权重结构
+│   │   ├── ops.h                   # RMSNorm / RoPE / Attention / FFN
+│   │   ├── kv_cache.h              # KV Cache
+│   │   ├── sampler.h               # 采样器
+│   │   ├── tokenizer.h             # Tokenizer 抽象与 SentencePiece 实现
+│   │   └── engine.h                # LlamaEngine 主接口
+│   ├── src/                        # 推理引擎实现
+│   ├── demo/chat_cli.cpp           # 命令行对话 demo
+│   └── test/                       # 单元测试与 HF 对齐测试
+│
+├── python_prototype/               # NumPy 参考实现与 HF 对齐脚本
+├── notix/httpserver/               # HTTP 服务化承载层
+└── docs/                           # 设计文档与阶段总结
 ```
 
-### Python 原型
+---
+
+## 构建推理引擎
+
+依赖:
+
+- CMake >= 3.16
+- C++17 编译器
+- Eigen 3.4，已放在 `llama-engine/third_party/eigen3`
+- C++ SentencePiece，默认从 `/usr/local/include` 与 `/usr/local/lib` 查找
+
+构建:
 
 ```bash
-cd python_prototype
-pip install -r requirements.txt
-python llama_forward.py                        # 独立测试
-python verify_against_hf.py --model ../model/TinyLlama-1.1B-Chat-v1.0  # HF 对比
+cd notix/llama-engine
+cmake -S . -B build
+cmake --build build -j2
 ```
 
-### HTTP 服务
+---
+
+## 运行命令行推理
+
+默认模型路径:
+
+- `notix/llama-engine/test/tinyllama.bin`
+- `models/tokenizer.model`
+
+运行:
 
 ```bash
-cd httpserver
-mkdir -p build && cd build
-cmake ..
-make
-./http_server
+cd notix/llama-engine/build
+./inferflow_cli
 ```
+
+也可以显式传入模型、tokenizer 和最大生成 token 数:
+
+```bash
+./inferflow_cli ../test/tinyllama.bin ../../../models/tokenizer.model 64
+```
+
+支持环境变量覆盖:
+
+```bash
+INFERFLOW_MODEL_PATH=/path/to/model.bin \
+INFERFLOW_TOKENIZER_PATH=/path/to/tokenizer.model \
+./inferflow_cli
+```
+
+CLI 命令:
+
+```text
+/exit   退出
+/quit   退出
+/clear  清空对话历史
+```
+
+---
+
+## 运行测试
+
+```bash
+cd notix/llama-engine/build
+./test_ops
+./test_engine
+./test_forward ../test/tinyllama.bin
+```
+
+当前验证结果:
+
+```text
+test_ops: 8/8
+test_engine: 8/8
+test_forward: Top-5 match 6/6, max_diff=4.76837e-05
+```
+
+---
+
+## 推理流程
+
+```text
+Prompt
+  -> SentencePiece Tokenizer
+  -> Token IDs
+  -> Embedding
+  -> Transformer Layer x N
+       -> RMSNorm
+       -> QKV Projection
+       -> RoPE
+       -> Attention with KV Cache
+       -> SwiGLU FFN
+  -> Final RMSNorm
+  -> LM Head
+  -> Sampler
+  -> Next Token
+  -> Decode / Stream Output
+```
+
+CLI 当前在 demo 层使用 TinyLlama-Chat 风格 prompt template:
+
+```text
+<|system|>
+You are a helpful assistant. Answer concisely.
+</s>
+<|user|>
+...
+</s>
+<|assistant|>
+```
+
+---
+
+## 已完成里程碑
+
+- Phase 0: Python/NumPy LLaMA 前向原型，与 HuggingFace 对齐。
+- Phase 1: C++ LLaMA 推理核心实现，完成 TinyLlama 前向验证。
+- Phase 2-A: `generate()` 生成闭环、SentencePiece tokenizer、文本级生成接口。
+- Phase 2-B: `inferflow_cli` 命令行对话 demo、chat prompt template、stop string 截断。
+
+---
+
+## 下一步计划
+
+### 可用化
+
+- 抽象独立 `ChatTemplate` 模块。
+- 完成 HTTP `/chat/completions` 非流式接口。
+- 增加 SSE token streaming。
+- 增加 InferenceWorker，避免推理阻塞 HTTP event loop。
+
+### 模型格式
+
+- 支持 GGUF 或 safetensors 加载。
+- 支持 Llama-2-7B 权重导出与验证。
+- 扩展 Llama3 / Qwen BPE tokenizer。
+
+### 性能优化
+
+- 设计统一 Tensor / allocator 抽象。
+- 设计 CPU/GPU backend interface。
+- 将 KV Cache、activation buffer、中间结果纳入设备侧 Tensor 管理。
+- 接入 RMSNorm、MatMul、Attention CUDA backend。
+- 预研 Int8 group-wise weight-only quantization 与动态反量化 MatMul。
+
+### 多模态扩展
+
+- 预留 Vision Encoder 接口。
+- 预留 multimodal embedding 拼接接口。
+- 为后续 LLaVA / Qwen-VL 类模型接入准备模型执行图抽象。
+
+---
+
+## 当前限制
+
+- 当前主路径仍是 CPU 推理，速度较慢。
+- 模型加载仍使用自定义 binary 格式。
+- tokenizer 首版只支持 SentencePiece。
+- HTTP 服务模块依赖 Boost，本机未安装 Boost 时只建议运行 `llama-engine` 与 CLI。
+- 多轮对话目前通过 prompt history 拼接实现，尚未复用会话级 KV Cache。

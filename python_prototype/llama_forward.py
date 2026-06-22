@@ -1,5 +1,5 @@
 """
-Phase 0: LLaMA Forward Pass — Pure NumPy Implementation
+LLaMA Forward Pass — Pure NumPy Implementation
 ========================================================
 
 This is the Python reference implementation for the C++ inference engine.

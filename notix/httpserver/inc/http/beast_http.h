@@ -110,6 +110,11 @@ public:
   void handle_chat_echo(middleware::HttpContext &ctx);
 
   /**
+   * @brief 静态路由处理：/chat/completions
+   */
+  void handle_chat_completions(middleware::HttpContext &ctx);
+
+  /**
    * @brief 静态路由处理：/chat/history
    */
   void handle_chat_history(middleware::HttpContext &ctx);

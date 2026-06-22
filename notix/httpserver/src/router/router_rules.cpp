@@ -131,6 +131,10 @@ namespace router
       {
         return static_route::chat_echo;
       }
+      if (normalized_target == ChatCompletionsRoute)
+      {
+        return static_route::chat_completions;
+      }
       if (normalized_target == ImageProcessRoute)
       {
         return static_route::image_process;
