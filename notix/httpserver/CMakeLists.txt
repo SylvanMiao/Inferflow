@@ -110,6 +110,7 @@ if(BUILD_HTTP_SERVER)
     target_include_directories(http_server PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/inc
         ${CMAKE_CURRENT_SOURCE_DIR}/inc/http
+        ${CMAKE_CURRENT_SOURCE_DIR}/inc/inference
         ${CMAKE_CURRENT_SOURCE_DIR}/inc/middleware
         ${CMAKE_CURRENT_SOURCE_DIR}/inc/router
         ${JSONCPP_INCLUDE_DIRS}
@@ -129,14 +130,15 @@ if(BUILD_HTTP_SERVER)
         ${MYSQL_LIBRARIES}
     )
 
-    # 运行目录位于 build 时，自动复制静态资源
-    add_custom_command(TARGET http_server POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:http_server>/static"
+    # 运行目录位于 build 时，每次构建都同步静态资源。
+    add_custom_target(sync_static_resources ALL
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_CURRENT_BINARY_DIR}/static"
         COMMAND ${CMAKE_COMMAND} -E copy_directory
                 "${CMAKE_CURRENT_SOURCE_DIR}/static"
-                "$<TARGET_FILE_DIR:http_server>/static"
-        COMMENT "Copy static resources"
+                "${CMAKE_CURRENT_BINARY_DIR}/static"
+        COMMENT "Sync static resources"
     )
+    add_dependencies(http_server sync_static_resources)
 endif()
 
 message(STATUS "Project source dir: ${CMAKE_CURRENT_SOURCE_DIR}")

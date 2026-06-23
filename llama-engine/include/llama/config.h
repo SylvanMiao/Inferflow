@@ -1,6 +1,6 @@
 #pragma once
 /**
- * Phase 1: LLaMA Model Configuration
+ * LLaMA Model Configuration
  * ==================================
  *
  * This header defines the model hyperparameters and generation settings.

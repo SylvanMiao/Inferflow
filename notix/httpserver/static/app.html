@@ -11,8 +11,10 @@
       --panel: #ffffff;
       --line: #d9e1ef;
       --text: #1f2937;
+      --muted: #6b7280;
       --primary: #1f6feb;
       --primary-hover: #1858bd;
+      --good: #0b8a5b;
     }
 
     body {
@@ -27,9 +29,13 @@
     }
 
     .wrap {
-      max-width: 760px;
+      max-width: 1080px;
       width: 100%;
       padding: 16px;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 300px;
+      gap: 16px;
+      align-items: start;
     }
 
     .panel {
@@ -114,7 +120,7 @@
     }
 
     .tip {
-      color: #6b7280;
+      color: var(--muted);
       font-size: 13px;
       margin-top: 8px;
     }
@@ -129,7 +135,84 @@
       margin-bottom: 10px;
     }
 
+    .metrics-panel {
+      position: sticky;
+      top: 16px;
+    }
+
+    .metrics-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      margin-bottom: 12px;
+    }
+
+    .metrics-head h2 {
+      margin: 0;
+    }
+
+    .status-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #cbd5e1;
+      box-shadow: 0 0 0 4px #f1f5f9;
+    }
+
+    .status-dot.active {
+      background: var(--good);
+      box-shadow: 0 0 0 4px #dcfce7;
+    }
+
+    .metric-grid {
+      display: grid;
+      gap: 10px;
+    }
+
+    .metric-card {
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: #fbfdff;
+      padding: 12px;
+    }
+
+    .metric-label {
+      color: var(--muted);
+      font-size: 12px;
+      margin-bottom: 4px;
+    }
+
+    .metric-value {
+      font-size: 20px;
+      font-weight: 700;
+      color: var(--text);
+      line-height: 1.1;
+    }
+
+    .metric-unit {
+      color: var(--muted);
+      font-size: 12px;
+      margin-left: 4px;
+      font-weight: 400;
+    }
+
+    .metrics-note {
+      margin-top: 12px;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.45;
+    }
+
     @media (max-width: 860px) {
+      .wrap {
+        grid-template-columns: 1fr;
+      }
+
+      .metrics-panel {
+        position: static;
+      }
+
       .chat-box {
         height: 320px;
       }
@@ -151,6 +234,41 @@
       <div id="chatTip" class="tip"></div>
     </section>
 
+    <aside class="panel metrics-panel">
+      <div class="metrics-head">
+        <h2>Metrics</h2>
+        <span id="metricsDot" class="status-dot"></span>
+      </div>
+      <div class="badge">Prefill / Decode</div>
+      <div class="metric-grid">
+        <div class="metric-card">
+          <div class="metric-label">Decode Throughput</div>
+          <div class="metric-value"><span id="metricTok">--</span><span class="metric-unit">tok/s</span></div>
+        </div>
+        <div class="metric-card">
+          <div class="metric-label">First Token</div>
+          <div class="metric-value"><span id="metricFirst">--</span><span class="metric-unit">ms</span></div>
+        </div>
+        <div class="metric-card">
+          <div class="metric-label">Prefill</div>
+          <div class="metric-value"><span id="metricPrefill">--</span><span class="metric-unit">ms</span></div>
+        </div>
+        <div class="metric-card">
+          <div class="metric-label">Decode</div>
+          <div class="metric-value"><span id="metricDecode">--</span><span class="metric-unit">ms</span></div>
+        </div>
+        <div class="metric-card">
+          <div class="metric-label">Tokens</div>
+          <div class="metric-value"><span id="metricTokens">--</span></div>
+        </div>
+        <div class="metric-card">
+          <div class="metric-label">Total</div>
+          <div class="metric-value"><span id="metricTotal">--</span><span class="metric-unit">ms</span></div>
+        </div>
+      </div>
+      <div id="metricsNote" class="metrics-note">等待第一次模型回复。</div>
+    </aside>
+
   </div>
 
   <script>
@@ -159,6 +277,51 @@
     const sendBtn = document.getElementById('sendBtn');
     const clearBtn = document.getElementById('clearBtn');
     const chatTip = document.getElementById('chatTip');
+    const metricsDot = document.getElementById('metricsDot');
+    const metricsNote = document.getElementById('metricsNote');
+    const metricTok = document.getElementById('metricTok');
+    const metricFirst = document.getElementById('metricFirst');
+    const metricPrefill = document.getElementById('metricPrefill');
+    const metricDecode = document.getElementById('metricDecode');
+    const metricTokens = document.getElementById('metricTokens');
+    const metricTotal = document.getElementById('metricTotal');
+
+    function formatMs(value) {
+      if (typeof value !== 'number' || !Number.isFinite(value)) {
+        return '--';
+      }
+      return value >= 100 ? Math.round(value).toString() : value.toFixed(1);
+    }
+
+    function formatRate(value) {
+      if (typeof value !== 'number' || !Number.isFinite(value)) {
+        return '--';
+      }
+      return value >= 10 ? value.toFixed(1) : value.toFixed(2);
+    }
+
+    function renderMetrics(metrics) {
+      if (!metrics) {
+        metricsDot.classList.remove('active');
+        metricTok.textContent = '--';
+        metricFirst.textContent = '--';
+        metricPrefill.textContent = '--';
+        metricDecode.textContent = '--';
+        metricTokens.textContent = '--';
+        metricTotal.textContent = '--';
+        metricsNote.textContent = '等待第一次模型回复。';
+        return;
+      }
+
+      metricsDot.classList.add('active');
+      metricTok.textContent = formatRate(metrics.decode_tokens_per_second);
+      metricFirst.textContent = formatMs(metrics.first_token_ms);
+      metricPrefill.textContent = formatMs(metrics.prefill_ms);
+      metricDecode.textContent = formatMs(metrics.decode_ms);
+      metricTokens.textContent = `${metrics.prompt_tokens || 0} / ${metrics.generated_tokens || 0}`;
+      metricTotal.textContent = formatMs(metrics.total_ms);
+      metricsNote.textContent = 'update per quest. Tokens : prompt / generated';
+    }
 
     function renderHistory(history) {
       chatBox.innerHTML = '';
@@ -218,8 +381,9 @@
         }
 
         renderHistory(data.history || []);
+        renderMetrics(data.metrics);
         msgInput.value = '';
-        chatTip.textContent = '已保存到会话历史';
+        chatTip.textContent = '';
       } catch (e) {
         chatTip.textContent = '请求失败，请检查服务连接';
       } finally {
@@ -245,6 +409,7 @@
         }
 
         renderHistory([]);
+        renderMetrics(null);
         msgInput.value = '';
         chatTip.textContent = data.kv_cache_reset
           ? '历史与模型缓存已清空'

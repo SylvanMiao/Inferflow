@@ -8,6 +8,7 @@
 #include "llama/ops.h"
 #include <cmath>
 #include <cstring>
+#include <chrono>
 #include <fstream>
 #include <iostream>
 #include <sstream>
@@ -19,6 +20,12 @@ namespace llama {
 // ═══════════════════════════════════════════════════════════════════════════
 
 namespace {
+
+using Clock = std::chrono::steady_clock;
+
+double elapsed_ms(Clock::time_point start, Clock::time_point end) {
+    return std::chrono::duration<double, std::milli>(end - start).count();
+}
 
 /** Read a scalar value from file. */
 template<typename T>
@@ -344,6 +351,9 @@ void LlamaEngine::generate_text_stream(const std::string& prompt,
                                        const GenerationConfig& gen_cfg) {
     if (!loaded_ || !tokenizer_ || gen_cfg.max_tokens <= 0) return;
 
+    last_metrics_ = InferenceMetrics{};
+    const auto total_start = Clock::now();
+
     sampler_->set_config(gen_cfg);
     kv_cache_->clear();
 
@@ -353,7 +363,9 @@ void LlamaEngine::generate_text_stream(const std::string& prompt,
 
     int prompt_len = static_cast<int>(prompt_tokens.size());
     int eos = config_.eos_token_id;
+    last_metrics_.prompt_tokens = prompt_len;
 
+    const auto prefill_start = Clock::now();
     for (int pos = 0; pos < prompt_len - 1; ++pos) {
         forward(prompt_tokens[pos], pos);
     }
@@ -366,11 +378,16 @@ void LlamaEngine::generate_text_stream(const std::string& prompt,
         Eigen::VectorXf logits = forward(config_.bos_token_id, 0);
         next_token = sampler_->sample(logits);
     }
+    const auto prefill_end = Clock::now();
+    last_metrics_.prefill_ms = elapsed_ms(prefill_start, prefill_end);
+    last_metrics_.first_token_ms = elapsed_ms(total_start, prefill_end);
 
     int decode_pos = prompt_len > 0 ? prompt_len : 1;
 
+    const auto decode_start = Clock::now();
     for (int step = 0; step < gen_cfg.max_tokens; ++step) {
         output_tokens.push_back(next_token);
+        last_metrics_.generated_tokens = static_cast<int32_t>(output_tokens.size());
         std::string decoded_text = tokenizer_->decode(output_tokens);
 
         bool stopped = false;
@@ -391,6 +408,14 @@ void LlamaEngine::generate_text_stream(const std::string& prompt,
 
         Eigen::VectorXf logits = forward(next_token, decode_pos + step);
         next_token = sampler_->sample(logits);
+    }
+
+    const auto decode_end = Clock::now();
+    last_metrics_.decode_ms = elapsed_ms(decode_start, decode_end);
+    last_metrics_.total_ms = elapsed_ms(total_start, decode_end);
+    if (last_metrics_.decode_ms > 0.0 && last_metrics_.generated_tokens > 0) {
+        last_metrics_.decode_tokens_per_second =
+            static_cast<double>(last_metrics_.generated_tokens) * 1000.0 / last_metrics_.decode_ms;
     }
 }
 

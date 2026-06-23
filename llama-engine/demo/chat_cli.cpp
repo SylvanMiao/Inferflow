@@ -28,6 +28,17 @@ void print_usage(const char* program) {
               << "Environment overrides: INFERFLOW_MODEL_PATH, INFERFLOW_TOKENIZER_PATH\n";
 }
 
+void print_metrics(const llama::InferenceMetrics& metrics) {
+    std::cout << "[metrics] prompt_tokens=" << metrics.prompt_tokens
+              << " generated_tokens=" << metrics.generated_tokens
+              << " prefill_ms=" << metrics.prefill_ms
+              << " first_token_ms=" << metrics.first_token_ms
+              << " decode_ms=" << metrics.decode_ms
+              << " total_ms=" << metrics.total_ms
+              << " decode_tok_s=" << metrics.decode_tokens_per_second
+              << std::endl;
+}
+
 std::string build_chat_prompt(const std::vector<std::pair<std::string, std::string>>& history,
                               const std::string& user_input) {
     std::string prompt;
@@ -119,6 +130,7 @@ int main(int argc, char** argv) {
             },
             gen_cfg);
         std::cout << std::endl;
+        print_metrics(engine.last_metrics());
 
         history.push_back({line, reply});
     }

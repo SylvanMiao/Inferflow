@@ -1,11 +1,11 @@
 #include "beast_http.h"
+#include "inference/chat_template.h"
+#include "inference/inference_service.h"
 #include "program_state_test.h"
 #include "router.h"
 #include "session/session_manager.h"
-#include "llama/engine.h"
 
-#include <mutex>
-#include <sstream>
+#include <stdexcept>
 
 http_connection::http_connection(tcp::socket socket) : _socket(std::move(socket))
 {
@@ -223,109 +223,6 @@ void http_connection::register_route_handlers()
 
 namespace
 {
-  std::string getenv_or_default(const char *key, const std::string &fallback)
-  {
-    const char *value = std::getenv(key);
-    if (value == nullptr || *value == '\0')
-    {
-      return fallback;
-    }
-    return value;
-  }
-
-  struct InferenceState
-  {
-    llama::LlamaEngine engine;
-    std::once_flag init_flag;
-    bool ready{false};
-  };
-
-  InferenceState &inference_state()
-  {
-    static InferenceState state;
-    return state;
-  }
-
-  llama::LlamaEngine &inference_engine()
-  {
-    auto &state = inference_state();
-
-    std::call_once(state.init_flag, [&state]()
-                   {
-                     const auto model_path = getenv_or_default(
-                         "INFERFLOW_MODEL_PATH", INFERFLOW_DEFAULT_MODEL_PATH);
-                     const auto tokenizer_path = getenv_or_default(
-                         "INFERFLOW_TOKENIZER_PATH", INFERFLOW_DEFAULT_TOKENIZER_PATH);
-
-                     state.ready = state.engine.load(model_path) && state.engine.load_tokenizer(tokenizer_path);
-                     if (!state.ready)
-                     {
-                       std::cerr << "Failed to initialize inference engine. model="
-                                 << model_path << " tokenizer=" << tokenizer_path << std::endl;
-                     }
-                   });
-
-    if (!state.ready)
-    {
-      throw std::runtime_error("inference engine is not ready");
-    }
-    return state.engine;
-  }
-
-  bool reset_inference_cache_if_loaded()
-  {
-    auto &state = inference_state();
-    if (!state.ready)
-    {
-      return false;
-    }
-
-    state.engine.reset_kv_cache();
-    return true;
-  }
-
-  std::string trim_copy(const std::string &text)
-  {
-    const auto first = text.find_first_not_of(" \t\r\n");
-    if (first == std::string::npos)
-    {
-      return {};
-    }
-
-    const auto last = text.find_last_not_of(" \t\r\n");
-    return text.substr(first, last - first + 1);
-  }
-
-  std::string build_chat_prompt(const std::vector<ChatMessage> &history,
-                                const std::string &user_text)
-  {
-    std::ostringstream prompt;
-    prompt << "You are Notix, a concise and helpful assistant.\n"
-           << "Continue the conversation naturally. Answer the latest user message.\n\n";
-
-    for (const auto &item : history)
-    {
-      const auto content = trim_copy(item.content);
-      if (content.empty())
-      {
-        continue;
-      }
-
-      if (item.role == "user")
-      {
-        prompt << "User: " << content << "\n";
-      }
-      else if (item.role == "assistant")
-      {
-        prompt << "Assistant: " << content << "\n";
-      }
-    }
-
-    prompt << "User: " << trim_copy(user_text) << "\n"
-           << "Assistant:";
-    return prompt.str();
-  }
-
   void append_history_json(Json::Value &target, const std::vector<ChatMessage> &history)
   {
     target = Json::arrayValue;
@@ -337,6 +234,19 @@ namespace
       row["created_at"] = static_cast<Json::Int64>(item.created_at_epoch);
       target.append(row);
     }
+  }
+
+  Json::Value metrics_to_json(const llama::InferenceMetrics &metrics)
+  {
+    Json::Value root;
+    root["prompt_tokens"] = metrics.prompt_tokens;
+    root["generated_tokens"] = metrics.generated_tokens;
+    root["prefill_ms"] = metrics.prefill_ms;
+    root["decode_ms"] = metrics.decode_ms;
+    root["first_token_ms"] = metrics.first_token_ms;
+    root["total_ms"] = metrics.total_ms;
+    root["decode_tokens_per_second"] = metrics.decode_tokens_per_second;
+    return root;
   }
 
   std::string read_cookie_value(const http::request<http::dynamic_body> &request,
@@ -760,11 +670,10 @@ void http_connection::handle_chat_completions(middleware::HttpContext &ctx)
   }
 
   const auto user_text = root["message"].asString();
-  llama::GenerationConfig gen_cfg;
-  gen_cfg.temperature = 0.0f;
-  gen_cfg.max_tokens = root.get("max_tokens", 128).asInt();
-  gen_cfg.stop_strings = {"\nUser:", "\nAssistant:", "\n用户:", "\n助手:"};
-  if (gen_cfg.max_tokens <= 0 || gen_cfg.max_tokens > 256)
+  inference::GenerateRequest inference_request;
+  inference_request.max_tokens = root.get("max_tokens", 128).asInt();
+  inference_request.temperature = 0.0f;
+  if (inference_request.max_tokens <= 0 || inference_request.max_tokens > 256)
   {
     send_error(http::status::bad_request, 1006, "max_tokens must be in range [1, 256]");
     return;
@@ -778,11 +687,19 @@ void http_connection::handle_chat_completions(middleware::HttpContext &ctx)
     return;
   }
 
-  const auto prompt = build_chat_prompt(history_before, user_text);
+  const auto prompt = inference::ChatTemplate{}.build_prompt(history_before, user_text);
+  inference_request.prompt = prompt.text;
+  inference::GenerateResponse inference_response;
   std::string reply_text;
   try
   {
-    reply_text = trim_copy(inference_engine().generate_text(prompt, gen_cfg));
+    inference_response = inference::InferenceService::instance().generate(inference_request);
+    reply_text = inference_response.text;
+  }
+  catch (const std::invalid_argument &e)
+  {
+    send_error(http::status::bad_request, 1006, e.what());
+    return;
   }
   catch (const std::exception &e)
   {
@@ -821,9 +738,10 @@ void http_connection::handle_chat_completions(middleware::HttpContext &ctx)
   resp["error"] = 0;
   resp["reply"] = reply_text;
   resp["user"] = record->user_id;
-  resp["model"] = "tinyllama";
-  resp["max_tokens"] = gen_cfg.max_tokens;
-  resp["prompt_messages"] = static_cast<Json::Int>(history_before.size() + 1);
+  resp["model"] = inference_response.model_name;
+  resp["max_tokens"] = inference_response.max_tokens;
+  resp["prompt_messages"] = static_cast<Json::Int>(prompt.message_count);
+  resp["metrics"] = metrics_to_json(inference_response.metrics);
   append_history_json(resp["history"], history_after);
   beast::ostream(ctx.response.body()) << resp.toStyledString();
 }
@@ -918,7 +836,7 @@ void http_connection::handle_chat_clear(middleware::HttpContext &ctx)
     return;
   }
 
-  const bool kv_cache_reset = reset_inference_cache_if_loaded();
+  const bool kv_cache_reset = inference::InferenceService::instance().reset_cache_if_loaded();
 
   ctx.response.result(http::status::ok);
   ctx.response.set(http::field::content_type, "application/json; charset=utf-8");

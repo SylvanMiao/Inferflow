@@ -23,6 +23,16 @@
 
 namespace llama {
 
+struct InferenceMetrics {
+    int32_t prompt_tokens = 0;
+    int32_t generated_tokens = 0;
+    double prefill_ms = 0.0;
+    double decode_ms = 0.0;
+    double first_token_ms = 0.0;
+    double total_ms = 0.0;
+    double decode_tokens_per_second = 0.0;
+};
+
 class LlamaEngine {
 public:
     LlamaEngine();
@@ -45,6 +55,7 @@ public:
 
     const ModelConfig& config() const { return config_; }
     const LlamaWeights& weights() const { return weights_; }
+    const InferenceMetrics& last_metrics() const { return last_metrics_; }
 
     // ---- Inference ----
 
@@ -101,6 +112,7 @@ private:
     std::unique_ptr<Sampler> sampler_;
     std::unique_ptr<Tokenizer> tokenizer_;
     bool loaded_ = false;
+    InferenceMetrics last_metrics_;
 
     // RoPE precomputed cache
     Eigen::MatrixXf cos_cache_;  // [max_seq_len, head_dim/2]
