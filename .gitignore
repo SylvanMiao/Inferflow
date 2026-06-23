@@ -1,28 +1,13 @@
-# 忽略所有 build 目录和以 build 开头的文件
+third_party/
 **/build/
-**/build
-/build/
-build/
-build.*
-*build*
-
-# 常见构建产物
-bin/
-obj/
-dist/
-out/
-target/
-*.class
+**/build-*/
 *.o
+*.a
 *.so
-*.dll
-*.exe
-*.jar
-*.war
-*.ear
-*.pyc
-__pycache__/
+*.bin
+*.model
 
+python_prototype/__pycache__/
 
 # demo
 /CppAIService
@@ -35,3 +20,4 @@ llama-engine/third_party/
 llama-engine/test/
 
 docs
+plan.md

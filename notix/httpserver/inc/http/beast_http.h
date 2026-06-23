@@ -120,6 +120,11 @@ public:
   void handle_chat_history(middleware::HttpContext &ctx);
 
   /**
+   * @brief 静态路由处理：/chat/clear
+   */
+  void handle_chat_clear(middleware::HttpContext &ctx);
+
+  /**
    * @brief 静态路由处理：/image/process（占位）
    */
   void handle_image_process(middleware::HttpContext &ctx);

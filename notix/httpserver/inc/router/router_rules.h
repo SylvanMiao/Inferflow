@@ -28,10 +28,11 @@ namespace router
 		register_page,   ///< `GET /register`
 		register_submit, ///< `POST /register`
 		app_page,         ///< `GET /app`
-		chat_history,     ///< `GET /chat/history`
-		chat_echo,        ///< `POST /chat/echo`
-		chat_completions, ///< `POST /chat/completions`
-		image_process,    ///< `POST /image/process`
+			chat_history,     ///< `GET /chat/history`
+			chat_echo,        ///< `POST /chat/echo`
+			chat_completions, ///< `POST /chat/completions`
+			chat_clear,       ///< `POST /chat/clear`
+			image_process,    ///< `POST /image/process`
 		me               ///< `GET /me`
 	};
 
@@ -69,9 +70,11 @@ namespace router
 	inline constexpr std::string_view AppRoute = "/app";
 	/** @brief 静态路由：会话 echo */
 	inline constexpr std::string_view ChatEchoRoute = "/chat/echo";
-	/** @brief 静态路由：LLM 对话补全 */
-	inline constexpr std::string_view ChatCompletionsRoute = "/chat/completions";
-	/** @brief 静态路由：聊天历史 */
+		/** @brief 静态路由：LLM 对话补全 */
+		inline constexpr std::string_view ChatCompletionsRoute = "/chat/completions";
+		/** @brief 静态路由：清空当前用户聊天历史 */
+		inline constexpr std::string_view ChatClearRoute = "/chat/clear";
+		/** @brief 静态路由：聊天历史 */
 	inline constexpr std::string_view ChatHistoryRoute = "/chat/history";
 	/** @brief 静态路由：图像处理占位 */
 	inline constexpr std::string_view ImageProcessRoute = "/image/process";

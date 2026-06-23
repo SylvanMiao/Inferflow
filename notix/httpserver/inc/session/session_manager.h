@@ -66,6 +66,8 @@ public:
   std::vector<ChatMessage> list_user_chat_messages(const std::string &user_id,
                                                    std::size_t limit,
                                                    std::string &error_message);
+  bool clear_user_chat_messages(const std::string &user_id,
+                                std::string &error_message);
   std::string create_session(const std::string &user_id);
   std::optional<SessionRecord> get_session(const std::string &session_id);
   bool delete_session(const std::string &session_id);

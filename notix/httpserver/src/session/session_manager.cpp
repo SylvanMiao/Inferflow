@@ -415,6 +415,44 @@ std::vector<ChatMessage> SessionManager::list_user_chat_messages(const std::stri
   return result;
 }
 
+bool SessionManager::clear_user_chat_messages(const std::string &user_id,
+                                              std::string &error_message)
+{
+  std::lock_guard<std::mutex> lock(mutex_);
+
+  if (user_id.empty())
+  {
+    error_message = "user id is empty";
+    return false;
+  }
+
+  if (!ensure_chat_table())
+  {
+    error_message = "prepare chat table failed";
+    return false;
+  }
+
+  auto guard = pool_->acquire();
+  MYSQL *conn = guard.get();
+
+  std::string uid;
+  uid.resize(user_id.size() * 2 + 1);
+  const auto uid_len = mysql_real_escape_string(conn, &uid[0], user_id.c_str(), user_id.size());
+  uid.resize(uid_len);
+
+  std::ostringstream ss;
+  ss << "DELETE FROM chat_messages WHERE user_id='" << uid << "';";
+  const auto sql = ss.str();
+
+  if (mysql_real_query(conn, sql.c_str(), sql.size()) != 0)
+  {
+    error_message = "clear chat history failed";
+    return false;
+  }
+
+  return true;
+}
+
 std::string SessionManager::create_session(const std::string &user_id)
 {
   const auto now = std::chrono::system_clock::now();

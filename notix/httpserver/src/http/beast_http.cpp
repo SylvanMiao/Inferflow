@@ -5,6 +5,7 @@
 #include "llama/engine.h"
 
 #include <mutex>
+#include <sstream>
 
 http_connection::http_connection(tcp::socket socket) : _socket(std::move(socket))
 {
@@ -188,6 +189,12 @@ void http_connection::register_route_handlers()
     handle_chat_history(ctx);
   };
 
+  _static_handlers[router::static_route::chat_clear] =
+      [this](middleware::HttpContext &ctx)
+  {
+    handle_chat_clear(ctx);
+  };
+
   _static_handlers[router::static_route::image_process] =
       [this](middleware::HttpContext &ctx)
   {
@@ -226,32 +233,110 @@ namespace
     return value;
   }
 
+  struct InferenceState
+  {
+    llama::LlamaEngine engine;
+    std::once_flag init_flag;
+    bool ready{false};
+  };
+
+  InferenceState &inference_state()
+  {
+    static InferenceState state;
+    return state;
+  }
+
   llama::LlamaEngine &inference_engine()
   {
-    static llama::LlamaEngine engine;
-    static std::once_flag init_flag;
-    static bool ready = false;
+    auto &state = inference_state();
 
-    std::call_once(init_flag, []()
+    std::call_once(state.init_flag, [&state]()
                    {
                      const auto model_path = getenv_or_default(
                          "INFERFLOW_MODEL_PATH", INFERFLOW_DEFAULT_MODEL_PATH);
                      const auto tokenizer_path = getenv_or_default(
                          "INFERFLOW_TOKENIZER_PATH", INFERFLOW_DEFAULT_TOKENIZER_PATH);
 
-                     ready = engine.load(model_path) && engine.load_tokenizer(tokenizer_path);
-                     if (!ready)
+                     state.ready = state.engine.load(model_path) && state.engine.load_tokenizer(tokenizer_path);
+                     if (!state.ready)
                      {
                        std::cerr << "Failed to initialize inference engine. model="
                                  << model_path << " tokenizer=" << tokenizer_path << std::endl;
                      }
                    });
 
-    if (!ready)
+    if (!state.ready)
     {
       throw std::runtime_error("inference engine is not ready");
     }
-    return engine;
+    return state.engine;
+  }
+
+  bool reset_inference_cache_if_loaded()
+  {
+    auto &state = inference_state();
+    if (!state.ready)
+    {
+      return false;
+    }
+
+    state.engine.reset_kv_cache();
+    return true;
+  }
+
+  std::string trim_copy(const std::string &text)
+  {
+    const auto first = text.find_first_not_of(" \t\r\n");
+    if (first == std::string::npos)
+    {
+      return {};
+    }
+
+    const auto last = text.find_last_not_of(" \t\r\n");
+    return text.substr(first, last - first + 1);
+  }
+
+  std::string build_chat_prompt(const std::vector<ChatMessage> &history,
+                                const std::string &user_text)
+  {
+    std::ostringstream prompt;
+    prompt << "You are Notix, a concise and helpful assistant.\n"
+           << "Continue the conversation naturally. Answer the latest user message.\n\n";
+
+    for (const auto &item : history)
+    {
+      const auto content = trim_copy(item.content);
+      if (content.empty())
+      {
+        continue;
+      }
+
+      if (item.role == "user")
+      {
+        prompt << "User: " << content << "\n";
+      }
+      else if (item.role == "assistant")
+      {
+        prompt << "Assistant: " << content << "\n";
+      }
+    }
+
+    prompt << "User: " << trim_copy(user_text) << "\n"
+           << "Assistant:";
+    return prompt.str();
+  }
+
+  void append_history_json(Json::Value &target, const std::vector<ChatMessage> &history)
+  {
+    target = Json::arrayValue;
+    for (const auto &item : history)
+    {
+      Json::Value row;
+      row["role"] = item.role;
+      row["content"] = item.content;
+      row["created_at"] = static_cast<Json::Int64>(item.created_at_epoch);
+      target.append(row);
+    }
   }
 
   std::string read_cookie_value(const http::request<http::dynamic_body> &request,
@@ -598,7 +683,7 @@ void http_connection::handle_chat_echo(middleware::HttpContext &ctx)
   }
 
   const auto user_text = root["message"].asString();
-  const auto reply_text = std::string("echo: ") + user_text;
+  const auto reply_text = user_text;
 
   std::string db_error;
   if (!manager.append_chat_message(record->session_id, record->user_id, "user", user_text, db_error))
@@ -677,17 +762,27 @@ void http_connection::handle_chat_completions(middleware::HttpContext &ctx)
   const auto user_text = root["message"].asString();
   llama::GenerationConfig gen_cfg;
   gen_cfg.temperature = 0.0f;
-  gen_cfg.max_tokens = root.get("max_tokens", 32).asInt();
+  gen_cfg.max_tokens = root.get("max_tokens", 128).asInt();
+  gen_cfg.stop_strings = {"\nUser:", "\nAssistant:", "\n用户:", "\n助手:"};
   if (gen_cfg.max_tokens <= 0 || gen_cfg.max_tokens > 256)
   {
     send_error(http::status::bad_request, 1006, "max_tokens must be in range [1, 256]");
     return;
   }
 
+  std::string db_error;
+  auto history_before = manager.list_user_chat_messages(record->user_id, 12, db_error);
+  if (!db_error.empty())
+  {
+    send_error(http::status::internal_server_error, 1502, db_error);
+    return;
+  }
+
+  const auto prompt = build_chat_prompt(history_before, user_text);
   std::string reply_text;
   try
   {
-    reply_text = inference_engine().generate_text(user_text, gen_cfg);
+    reply_text = trim_copy(inference_engine().generate_text(prompt, gen_cfg));
   }
   catch (const std::exception &e)
   {
@@ -695,7 +790,11 @@ void http_connection::handle_chat_completions(middleware::HttpContext &ctx)
     return;
   }
 
-  std::string db_error;
+  if (reply_text.empty())
+  {
+    reply_text = "模型没有生成有效回复，请稍后再试。";
+  }
+
   if (!manager.append_chat_message(record->session_id, record->user_id, "user", user_text, db_error))
   {
     send_error(http::status::internal_server_error, 1501, db_error);
@@ -708,6 +807,13 @@ void http_connection::handle_chat_completions(middleware::HttpContext &ctx)
     return;
   }
 
+  auto history_after = manager.list_user_chat_messages(record->user_id, 50, db_error);
+  if (!db_error.empty())
+  {
+    send_error(http::status::internal_server_error, 1502, db_error);
+    return;
+  }
+
   ctx.response.result(http::status::ok);
   ctx.response.set(http::field::content_type, "application/json; charset=utf-8");
 
@@ -717,6 +823,8 @@ void http_connection::handle_chat_completions(middleware::HttpContext &ctx)
   resp["user"] = record->user_id;
   resp["model"] = "tinyllama";
   resp["max_tokens"] = gen_cfg.max_tokens;
+  resp["prompt_messages"] = static_cast<Json::Int>(history_before.size() + 1);
+  append_history_json(resp["history"], history_after);
   beast::ostream(ctx.response.body()) << resp.toStyledString();
 }
 
@@ -772,6 +880,55 @@ void http_connection::handle_chat_history(middleware::HttpContext &ctx)
     resp["history"].append(row);
   }
 
+  beast::ostream(ctx.response.body()) << resp.toStyledString();
+}
+
+void http_connection::handle_chat_clear(middleware::HttpContext &ctx)
+{
+  SessionConfig config;
+  config.user_file = "static/users.json";
+  config.db_config_file = "static/db.json";
+  config.ttl_seconds = 3600;
+
+  auto &manager = SessionManager::instance();
+  if (!manager.ensure_initialized(config))
+  {
+    send_error(http::status::internal_server_error, 1500, "session manager init failed");
+    return;
+  }
+
+  const auto session_id = read_cookie_value(ctx.request, "SID");
+  if (session_id.empty())
+  {
+    send_error(http::status::unauthorized, 1403, "missing session");
+    return;
+  }
+
+  auto record = manager.get_session(session_id);
+  if (!record)
+  {
+    send_error(http::status::unauthorized, 1403, "session expired");
+    return;
+  }
+
+  std::string db_error;
+  if (!manager.clear_user_chat_messages(record->user_id, db_error))
+  {
+    send_error(http::status::internal_server_error, 1504, db_error);
+    return;
+  }
+
+  const bool kv_cache_reset = reset_inference_cache_if_loaded();
+
+  ctx.response.result(http::status::ok);
+  ctx.response.set(http::field::content_type, "application/json; charset=utf-8");
+
+  Json::Value resp;
+  resp["error"] = 0;
+  resp["user"] = record->user_id;
+  resp["msg"] = "chat history cleared";
+  resp["kv_cache_reset"] = kv_cache_reset;
+  resp["history"] = Json::arrayValue;
   beast::ostream(ctx.response.body()) << resp.toStyledString();
 }
 

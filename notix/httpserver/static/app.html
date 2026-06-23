@@ -27,12 +27,9 @@
     }
 
     .wrap {
-      max-width: 980px;
+      max-width: 760px;
       width: 100%;
       padding: 16px;
-      display: grid;
-      grid-template-columns: 1.6fr 1fr;
-      gap: 16px;
     }
 
     .panel {
@@ -101,6 +98,21 @@
       background: var(--primary-hover);
     }
 
+    button.secondary {
+      background: #eef2f7;
+      color: var(--text);
+      border: 1px solid var(--line);
+    }
+
+    button.secondary:hover {
+      background: #e3e9f2;
+    }
+
+    button:disabled {
+      opacity: 0.65;
+      cursor: not-allowed;
+    }
+
     .tip {
       color: #6b7280;
       font-size: 13px;
@@ -118,10 +130,6 @@
     }
 
     @media (max-width: 860px) {
-      .wrap {
-        grid-template-columns: 1fr;
-      }
-
       .chat-box {
         height: 320px;
       }
@@ -132,31 +140,25 @@
 <body>
   <div class="wrap">
     <section class="panel">
-      <h2>会话对话（Echo）</h2>
-      <div class="badge">Session + MySQL 持久化</div>
+      <h2>Chat</h2>
+      <div class="badge">inferflowEngine + Session 存储</div>
       <div id="chatBox" class="chat-box"></div>
       <div class="input-area">
-        <textarea id="msgInput" placeholder="输入内容后发送，服务端会以 echo 方式返回"></textarea>
+        <textarea id="msgInput" placeholder="Model will reply based on chat history."></textarea>
         <button id="sendBtn">发送</button>
+        <button id="clearBtn" class="secondary">清空</button>
       </div>
       <div id="chatTip" class="tip"></div>
     </section>
 
-    <section class="panel">
-      <h2>图像处理模块</h2>
-      <div class="badge">接口已预留</div>
-      <p>当前阶段先保留接口，不做具体图像算法处理。</p>
-      <p>预留 API：POST /image/process</p>
-      <button id="imgBtn">调用占位接口</button>
-      <div id="imgTip" class="tip"></div>
-    </section>
   </div>
 
   <script>
     const chatBox = document.getElementById('chatBox');
     const msgInput = document.getElementById('msgInput');
+    const sendBtn = document.getElementById('sendBtn');
+    const clearBtn = document.getElementById('clearBtn');
     const chatTip = document.getElementById('chatTip');
-    const imgTip = document.getElementById('imgTip');
 
     function renderHistory(history) {
       chatBox.innerHTML = '';
@@ -199,12 +201,14 @@
         return;
       }
 
-      chatTip.textContent = '发送中...';
+      chatTip.textContent = '推理中...';
+      sendBtn.disabled = true;
+      clearBtn.disabled = true;
       try {
-        const res = await fetch('/chat/echo', {
+        const res = await fetch('/chat/completions', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ message })
+          body: JSON.stringify({ message, max_tokens: 128 })
         });
 
         const data = await res.json();
@@ -218,29 +222,47 @@
         chatTip.textContent = '已保存到会话历史';
       } catch (e) {
         chatTip.textContent = '请求失败，请检查服务连接';
+      } finally {
+        sendBtn.disabled = false;
+        clearBtn.disabled = false;
       }
     }
 
-    document.getElementById('sendBtn').addEventListener('click', sendMessage);
+    async function clearChat() {
+      chatTip.textContent = '清空中...';
+      sendBtn.disabled = true;
+      clearBtn.disabled = true;
+      try {
+        const res = await fetch('/chat/clear', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: '{}'
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          chatTip.textContent = data.message || '清空失败';
+          return;
+        }
+
+        renderHistory([]);
+        msgInput.value = '';
+        chatTip.textContent = data.kv_cache_reset
+          ? '历史与模型缓存已清空'
+          : '历史已清空';
+      } catch (e) {
+        chatTip.textContent = '请求失败，请检查服务连接';
+      } finally {
+        sendBtn.disabled = false;
+        clearBtn.disabled = false;
+      }
+    }
+
+    sendBtn.addEventListener('click', sendMessage);
+    clearBtn.addEventListener('click', clearChat);
     msgInput.addEventListener('keydown', (e) => {
       if (e.key === 'Enter' && !e.shiftKey) {
         e.preventDefault();
         sendMessage();
-      }
-    });
-
-    document.getElementById('imgBtn').addEventListener('click', async () => {
-      imgTip.textContent = '调用中...';
-      try {
-        const res = await fetch('/image/process', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({})
-        });
-        const data = await res.json();
-        imgTip.textContent = data.msg || JSON.stringify(data);
-      } catch (e) {
-        imgTip.textContent = '请求失败';
       }
     });
 
