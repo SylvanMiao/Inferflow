@@ -10,14 +10,13 @@ third_party/
 python_prototype/__pycache__/
 
 # demo
-/CppAIService
 todo.md
-
+plan.md
+docs
 
 model
 llama-engine/build/
 llama-engine/third_party/
 llama-engine/test/*.bin
 
-docs
-plan.md
+
