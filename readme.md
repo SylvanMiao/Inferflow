@@ -1,245 +1,166 @@
-# InferFlow 大模型推理服务框架
+# InferFlow 本地大模型推理服务框架
 
-InferFlow 是一个面向本地与私有化部署场景的轻量级大模型推理服务框架。当前重点围绕 decoder-only LLM 构建模型加载、Tokenizer、KV Cache、token-level decoding、采样与命令行交互能力，并为后续 HTTP API、CUDA backend、Int8 量化和多模态 embedding 扩展预留接口。
+InferFlow是一个面向本地与私有化部署场景的轻量级 LLM 推理服务项目。当前主线以Llama为验证模型，实现了decoder-only Transformer的推理链路、CPU Int8量化路径、可选CUDA backend、HTTP API服务层和前端对话页面
 
-当前验证模型为 TinyLlama-1.1B，推理流程与 LLaMA 类 decoder-only 模型保持一致，适合用于调试 RMSNorm、RoPE、Attention、SwiGLU、KV Cache 和自回归生成流程。
 
----
+## Demo
 
-## Demo 展示
+![InferFlow HTTP 对话 Demo](pics/image_http.png)
 
-![InferFlow HTTP 对话 Demo](pics/image.png)
+![InferFlow CLI 对话 Demo](pics/image_cli.png)
 
----
+## 当前完成内容
 
-## 当前能力
+- 推理引擎：模型加载、Tokenizer、Sampler、KV Cache、autoregressive decoding
+- 核心算子：RMSNorm、RoPE、GQA Attention、SwiGLU、LM Head
+- CPU Int8：group-wise weight-only Int8、动态反量化 MatMul、OpenMP 行并行、AVX2 内层 SIMD
+- CUDA backend：RMSNorm、MatMul、RoPE、Attention、GPU KV Cache 的功能性实现与 TinyLlama CPU/CUDA parity 测试
+- 服务化：Boost.Asio/Beast HTTP 服务、路由分发、中间件、统一错误响应、请求体限制、连接超时、MySQL 会话与历史记录
+- 前端：本地对话页面，支持会话历史、清空会话、推理 metrics 展示
 
-### 推理引擎
+当前未完成或暂缓：
 
-- 支持 LLaMA 类 decoder-only Transformer 前向推理。
-- 实现 RMSNorm、RoPE、GQA Attention、SwiGLU、LM Head 等核心模块。
-- 实现 KV Cache 加速的 autoregressive decoding。
-- 实现 temperature、top-k、top-p 采样器。
-- 实现 `generate()`、`generate_text()`、`generate_text_stream()`。
-- 接入 C++ SentencePiece tokenizer，支持文本 encode/decode。
-- 支持 stop string 截断，避免输出 `</s>`、`<|user|>` 等模板标记。
-- 提供命令行对话 demo `inferflow_cli`。
-
-### 正确性验证
-
-- Python/NumPy 原型用于对齐 HuggingFace 行为。
-- C++ 推理引擎已与 HuggingFace 逐 token 前向结果对齐。
-- TinyLlama 测试样例中 top-5 logits match 通过，最大误差约 `4.77e-05`。
-
-### 服务化承载
-
-项目内保留 Boost.Asio/Beast HTTP 服务模块，用于后续将本地推理能力封装为 `/chat/completions` API。该部分包含基础路由、中间件、Cookie Session、MySQL 会话与聊天历史持久化，但当前 README 不再以 Web 网关为主要叙事。
-
----
+- CUDA 端性能优化与 CUDA Int8 整模型推理。
+- LLaMA-2-7B / Qwen2.5 的完整导出、tokenizer 与 benchmark 验证。
+- 多模态视觉编码器接入。
 
 ## 目录结构
 
 ```text
-notix/
-├── llama-engine/                  # 推理引擎主体
-│   ├── include/llama/
-│   │   ├── config.h                # ModelConfig / GenerationConfig
-│   │   ├── weights.h               # 权重结构
-│   │   ├── ops.h                   # RMSNorm / RoPE / Attention / FFN
-│   │   ├── kv_cache.h              # KV Cache
-│   │   ├── sampler.h               # 采样器
-│   │   ├── tokenizer.h             # Tokenizer 抽象与 SentencePiece 实现
-│   │   └── engine.h                # LlamaEngine 主接口
-│   ├── src/                        # 推理引擎实现
-│   ├── demo/chat_cli.cpp           # 命令行对话 demo
-│   └── test/                       # 单元测试与 HF 对齐测试
-│
-├── python_prototype/               # NumPy 参考实现与 HF 对齐脚本
-├── notix/httpserver/               # HTTP 服务化承载层
-└── docs/                           # 设计文档与阶段总结
+inferflow/
+├── llama-engine/              # C++ 推理引擎
+│   ├── include/llama/          # config / engine / kv_cache / tokenizer / backend / quantization
+│   ├── src/                    # 推理、算子、CPU/CUDA backend 实现
+│   ├── demo/chat_cli.cpp       # CLI 对话入口
+│   ├── bench/bench_forward.cpp # forward benchmark
+│   └── test/                   # 单元测试与 TinyLlama 对齐测试
+├── notix/httpserver/           # HTTP 服务和前端页面
+├── python_prototype/           # Python/NumPy 原型与 HF 导出脚本
+└── scripts/build_all.sh        # 构建脚本
 ```
 
----
+## 构建
 
-## 构建推理引擎
-
-依赖:
-
-- CMake >= 3.16
-- C++17 编译器
-- Eigen 3.4，已放在 `llama-engine/third_party/eigen3`
-- C++ SentencePiece，默认从 `/usr/local/include` 与 `/usr/local/lib` 查找
-
-一键构建推理引擎与 HTTP 服务:
+CPU 默认构建：
 
 ```bash
-cd inferflow
-scripts/build_all.sh -j4
+scripts/build_all.sh -j 4
 ```
 
-如需清理旧构建目录后重建:
+清理旧构建目录：
 
 ```bash
-scripts/build_all.sh --clean -j4
+scripts/build_all.sh --clean -j 4
 ```
 
-构建:
+CUDA可选构建：
 
 ```bash
-cd notix/llama-engine
-cmake -S . -B build
-cmake --build build -j2
+scripts/build_all.sh --cuda -j 4
 ```
 
----
+## CLI 推理
 
-## 运行命令行推理
-
-默认模型路径:
-
-- `notix/llama-engine/test/tinyllama.bin`
-- `models/tokenizer.model`
-
-运行:
+参数格式：
 
 ```bash
-cd notix/llama-engine/build
-./inferflow_cli
+./inferflow_cli [model.bin] [tokenizer.model] [max_tokens] [backend] [precision]
 ```
 
-也可以显式传入模型、tokenizer 和最大生成 token 数:
-
-```bash
-./inferflow_cli ../test/tinyllama.bin ../../../models/tokenizer.model 64
-```
-
-支持环境变量覆盖:
-
-```bash
-INFERFLOW_MODEL_PATH=/path/to/model.bin \
-INFERFLOW_TOKENIZER_PATH=/path/to/tokenizer.model \
-./inferflow_cli
-```
-
-CLI 命令:
+参数说明：
 
 ```text
-/exit   退出
-/quit   退出
-/clear  清空对话历史
+model.bin        模型权重文件
+tokenizer.model  SentencePiece tokenizer 文件
+max_tokens       单轮最多生成 token 数
+backend          推理后端，可选 cpu 或 cuda
+precision        权重精度模式，可选 fp32 或 int8
 ```
 
----
-
-## 运行测试
+CPU FP32：
 
 ```bash
-cd notix/llama-engine/build
-./test_ops
-./test_engine
+cd ./inferflow/llama-engine/build
+./inferflow_cli ../test/tinyllama.bin ../../../models/tokenizer.model 64 cpu fp32
+```
+
+CPU Int8：
+
+```bash
+./inferflow_cli ../test/tinyllama.bin ../../../models/tokenizer.model 64 cpu int8
+```
+
+
+CUDA FP32：
+
+```bash
+cd ./inferflow/llama-engine/build
+./inferflow_cli ../test/tinyllama.bin ../../../models/tokenizer.model 64 cuda fp32
+```
+
+也可以通过环境变量指定 CUDA backend：
+
+```bash
+INFERFLOW_BACKEND=cuda ./inferflow_cli ../test/tinyllama.bin ../../../models/tokenizer.model 64
+```
+
+说明：当前整模型 Int8 推理只接入 CPU 路径，CUDA 路径用于 FP32 backend 功能验证；不要使用 `cuda int8` 作为演示命令。
+
+也可以通过环境变量开启 Int8：
+
+```bash
+INFERFLOW_INT8=1 ./inferflow_cli ../test/tinyllama.bin ../../../models/tokenizer.model 64 cpu
+```
+
+CLI 命令：
+
+```text
+/clear  清空当前 CLI 历史
+/exit   退出
+/quit   退出
+```
+
+## HTTP 服务
+
+启动：
+
+```bash
+cd ./inferflow/notix/httpserver
+./build-http/http_server
+```
+
+默认监听：
+
+```text
+http://127.0.0.1:10086
+```
+
+常用页面与接口：
+
+- `GET /app`：前端对话页
+- `POST /chat/completions`：非流式推理接口
+- `GET /chat/history`：读取当前会话历史
+- `POST /chat/clear`：清空当前会话历史与模型 KV Cache
+
+
+## 测试
+
+```bash
+cd ./inferflow/llama-engine/build
+./test_quantization
+./test_int8_forward ../test/tinyllama.bin
 ./test_forward ../test/tinyllama.bin
 ```
 
-当前验证结果:
-
-```text
-test_ops: 8/8
-test_engine: 8/8
-test_forward: Top-5 match 6/6, max_diff=4.76837e-05
-```
-
----
-
-## 推理流程
-
-```text
-Prompt
-  -> SentencePiece Tokenizer
-  -> Token IDs
-  -> Embedding
-  -> Transformer Layer x N
-       -> RMSNorm
-       -> QKV Projection
-       -> RoPE
-       -> Attention with KV Cache
-       -> SwiGLU FFN
-  -> Final RMSNorm
-  -> LM Head
-  -> Sampler
-  -> Next Token
-  -> Decode / Stream Output
-```
-
-CLI 当前在 demo 层使用 TinyLlama-Chat 风格 prompt template:
-
-```text
-<|system|>
-You are a helpful assistant. Answer concisely.
-</s>
-<|user|>
-...
-</s>
-<|assistant|>
-```
-
----
-
-## 已完成里程碑
-
-- Phase 0: Python/NumPy LLaMA 前向原型，与 HuggingFace 对齐。
-- Phase 1: C++ LLaMA 推理核心实现，完成 TinyLlama 前向验证。
-- Phase 2-A: `generate()` 生成闭环、SentencePiece tokenizer、文本级生成接口。
-- Phase 2-B: `inferflow_cli` 命令行对话 demo、chat prompt template、stop string 截断。
-
----
-
-## 下一步计划
-
-### 可用化
-
-- 抽象独立 `ChatTemplate` 模块。
-- 完成 HTTP `/chat/completions` 非流式接口。
-- 增加 SSE token streaming。
-- 增加 InferenceWorker，避免推理阻塞 HTTP event loop。
-
-### 模型格式
-
-- 支持 GGUF 或 safetensors 加载。
-- 支持 Llama-2-7B 权重导出与验证。
-- 扩展 Llama3 / Qwen BPE tokenizer。
-
-### 性能优化
-
-- 设计统一 Tensor / allocator 抽象。
-- 设计 CPU/GPU backend interface。
-- 将 KV Cache、activation buffer、中间结果纳入设备侧 Tensor 管理。
-- 接入 RMSNorm、MatMul、Attention CUDA backend。
-- 预研 Int8 group-wise weight-only quantization 与动态反量化 MatMul。
-
-### 多模态扩展
-
-- 预留 Vision Encoder 接口。
-- 预留 multimodal embedding 拼接接口。
-- 为后续 LLaVA / Qwen-VL 类模型接入准备模型执行图抽象。
-
----
-
-## 当前限制
-
-- 当前主路径仍是 CPU 推理，速度较慢。
-- 模型加载仍使用自定义 binary 格式。
-- tokenizer 首版只支持 SentencePiece。
-- HTTP 服务模块依赖 Boost，本机未安装 Boost 时只建议运行 `llama-engine` 与 CLI。
-- 多轮对话目前通过 prompt history 拼接实现，尚未复用会话级 KV Cache。
-
----
-
-## 项目依赖
+CUDA 构建后可运行：
 
 ```bash
-sudo apt install -y \
-  cmake g++ \
-  libboost-system-dev \
-  libjsoncpp-dev \
-  default-libmysqlclient-dev
+./test_cuda_backend
+./test_cuda_forward ../test/tinyllama.bin
+```
+
+Forward benchmark：
+
+```bash
+./bench_forward ../test/tinyllama.bin --backend cpu --max-tokens 6 --warmup 1 --repeat 3
 ```

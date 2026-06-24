@@ -4,6 +4,7 @@ project(notix_httpserver LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 option(BUILD_HTTP_SERVER "Build the HTTP server executable" ON)
 option(BUILD_LIBTESTS "Build Boost/jsoncpp smoke tests" ON)

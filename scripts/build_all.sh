@@ -5,6 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 JOBS="${JOBS:-4}"
 CLEAN=0
 BUILD_TESTS=1
+ENABLE_CUDA=0
 
 usage() {
   cat <<'USAGE'
@@ -13,6 +14,7 @@ Usage: scripts/build_all.sh [options]
 Options:
   --clean        Remove existing build directories before building.
   --no-tests     Do not build Boost/jsoncpp smoke test targets in httpserver.
+  --cuda         Build llama-engine with optional CUDA backend tests.
   -j, --jobs N   Parallel build jobs. Defaults to JOBS env or 4.
   -h, --help     Show this help.
 
@@ -30,6 +32,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --no-tests)
       BUILD_TESTS=0
+      shift
+      ;;
+    --cuda)
+      ENABLE_CUDA=1
       shift
       ;;
     -j|--jobs)
@@ -81,7 +87,9 @@ if [[ "$CLEAN" -eq 1 ]]; then
 fi
 
 echo "[InferFlow] configuring llama-engine"
-cmake -S "$ROOT_DIR/llama-engine" -B "$ROOT_DIR/llama-engine/build"
+cmake -S "$ROOT_DIR/llama-engine" \
+  -B "$ROOT_DIR/llama-engine/build" \
+  -DINFERFLOW_ENABLE_CUDA="$ENABLE_CUDA"
 
 echo "[InferFlow] building llama-engine"
 cmake --build "$ROOT_DIR/llama-engine/build" -j "$JOBS"

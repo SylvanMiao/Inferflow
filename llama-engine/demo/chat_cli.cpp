@@ -1,7 +1,9 @@
 #include "llama/engine.h"
+#include "llama/backend/backend.h"
 
 #include <cstdlib>
 #include <iostream>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -24,8 +26,10 @@ std::string getenv_or_default(const char* key, const std::string& fallback) {
 }
 
 void print_usage(const char* program) {
-    std::cout << "Usage: " << program << " [model.bin] [tokenizer.model] [max_tokens]\n"
-              << "Environment overrides: INFERFLOW_MODEL_PATH, INFERFLOW_TOKENIZER_PATH\n";
+    std::cout << "Usage: " << program << " [model.bin] [tokenizer.model] [max_tokens] [backend] [precision]\n"
+              << "  backend: cpu or cuda. Default: INFERFLOW_BACKEND or cpu.\n"
+              << "  precision: fp32 or int8. Default: INFERFLOW_PRECISION / INFERFLOW_INT8 or fp32.\n"
+              << "Environment overrides: INFERFLOW_MODEL_PATH, INFERFLOW_TOKENIZER_PATH, INFERFLOW_BACKEND, INFERFLOW_PRECISION, INFERFLOW_INT8\n";
 }
 
 void print_metrics(const llama::InferenceMetrics& metrics) {
@@ -62,6 +66,42 @@ std::string build_chat_prompt(const std::vector<std::pair<std::string, std::stri
     return prompt;
 }
 
+llama::backend::BackendKind parse_backend(const std::string& value) {
+    if (value == "cpu" || value == "CPU") {
+        return llama::backend::BackendKind::CPU;
+    }
+    if (value == "cuda" || value == "CUDA") {
+        return llama::backend::BackendKind::CUDA;
+    }
+    throw std::runtime_error("backend must be cpu or cuda");
+}
+
+bool parse_int8_enabled(const std::string& value) {
+    if (value == "int8" || value == "INT8" ||
+        value == "1" || value == "true" || value == "TRUE" ||
+        value == "on" || value == "ON" || value == "yes" || value == "YES") {
+        return true;
+    }
+    if (value == "fp32" || value == "FP32" ||
+        value == "0" || value == "false" || value == "FALSE" ||
+        value == "off" || value == "OFF" || value == "no" || value == "NO") {
+        return false;
+    }
+    throw std::runtime_error("precision must be fp32 or int8");
+}
+
+std::string default_precision() {
+    const char* precision = std::getenv("INFERFLOW_PRECISION");
+    if (precision != nullptr && *precision != '\0') {
+        return precision;
+    }
+    const char* int8 = std::getenv("INFERFLOW_INT8");
+    if (int8 != nullptr && *int8 != '\0') {
+        return int8;
+    }
+    return "fp32";
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -76,6 +116,16 @@ int main(int argc, char** argv) {
     std::string tokenizer_path = argc > 2
         ? argv[2]
         : getenv_or_default("INFERFLOW_TOKENIZER_PATH", INFERFLOW_DEFAULT_TOKENIZER_PATH);
+    std::string backend_name = argc > 4
+        ? argv[4]
+        : getenv_or_default("INFERFLOW_BACKEND", "cpu");
+    std::string precision_name = argc > 5 ? argv[5] : default_precision();
+
+    if (backend_name == "int8" || backend_name == "INT8" ||
+        backend_name == "fp32" || backend_name == "FP32") {
+        precision_name = backend_name;
+        backend_name = getenv_or_default("INFERFLOW_BACKEND", "cpu");
+    }
 
     llama::GenerationConfig gen_cfg;
     gen_cfg.max_tokens = argc > 3 ? std::stoi(argv[3]) : 64;
@@ -97,7 +147,39 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    std::cout << "InferFlow CLI ready. Type /exit to quit, /clear to reset history.\n";
+    llama::backend::BackendKind backend;
+    bool int8_enabled = false;
+    try {
+        backend = parse_backend(backend_name);
+        int8_enabled = parse_int8_enabled(precision_name);
+    } catch (const std::exception& e) {
+        std::cerr << e.what() << std::endl;
+        return 1;
+    }
+
+    if (!engine.set_backend(backend)) {
+        std::cerr << "Failed to enable backend: " << backend_name
+                  << ". Was llama-engine built with --cuda and is a CUDA device visible?"
+                  << std::endl;
+        return 1;
+    }
+
+    if (int8_enabled) {
+        if (engine.backend_kind() != llama::backend::BackendKind::CPU) {
+            std::cerr << "Int8 full-forward path is currently CPU-only. Use backend=cpu for int8 CLI inference."
+                      << std::endl;
+            return 1;
+        }
+        if (!engine.quantize_int8(128) || !engine.use_int8_weights(true)) {
+            std::cerr << "Failed to enable Int8 weights." << std::endl;
+            return 1;
+        }
+    }
+
+    std::cout << "InferFlow CLI ready. backend="
+              << llama::backend::backend_name(engine.backend_kind())
+              << " precision=" << (engine.int8_enabled() ? "int8" : "fp32")
+              << ". Type /exit to quit, /clear to reset history.\n";
 
     std::string line;
     std::vector<std::pair<std::string, std::string>> history;
